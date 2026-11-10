@@ -516,7 +516,7 @@ class MarketParts:
         for _ in range(8):
             time.sleep(2)
             try:
-                bought = bool(steam.buy_order_status(self.session, order["orderid"]).get("purchased"))
+                bought = bool(steam.buy_order_status(self.session, order["orderid"], hash_name).get("purchased"))
             except steam.HttpError:
                 # Steam's status check turns away orders that filled at once; an order that's no
                 # longer open has filled (nothing here cancels one before this point)

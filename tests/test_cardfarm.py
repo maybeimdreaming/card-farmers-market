@@ -542,7 +542,7 @@ def buying_world(monkeypatch, fills=True):
     log = []
     monkeypatch.setattr(market_mod.time, "sleep", lambda x: None)
     monkeypatch.setattr(steam, "create_buy_order", lambda s, h, p, q=1, **kw: log.append(("order", h, p) if q == 1 else ("order", h, p, q)) or {"orderid": h})
-    monkeypatch.setattr(steam, "buy_order_status", lambda s, o: {"purchased": 1 if fills else 0})
+    monkeypatch.setattr(steam, "buy_order_status", lambda s, o, *a: {"purchased": 1 if fills else 0})
     monkeypatch.setattr(steam, "cancel_buy_order", lambda s, o: log.append(("cancel", o)))
     monkeypatch.setattr(steam, "card_set", lambda s, a: {"level": 0, "cards": []})
     monkeypatch.setattr(steam, "craft_badge", lambda s, a: log.append(("craft", a)))
@@ -590,7 +590,7 @@ def test_a_set_being_finished_keeps_its_cards(world, monkeypatch):
 
 def test_a_filled_order_counts_even_when_the_status_check_fails(world, monkeypatch):
     log = buying_world(monkeypatch)
-    def refuse(s, o):
+    def refuse(s, o, *a):
         raise steam.HttpError(400)
     monkeypatch.setattr(steam, "buy_order_status", refuse)
     monkeypatch.setattr(steam, "open_buy_orders", lambda s: set())
@@ -1025,7 +1025,7 @@ def test_a_badge_plan_counts_the_cards_you_have():
 def quick_world(world, monkeypatch, wallet=1000):
     log = buying_world(monkeypatch)
     monkeypatch.setattr(quick_mod.time, "sleep", lambda x: None)
-    monkeypatch.setattr(steam, "buy_order_status", lambda s, o: {"quantity": "9", "quantity_remaining": "0"})
+    monkeypatch.setattr(steam, "buy_order_status", lambda s, o, *a: {"quantity": "9", "quantity_remaining": "0"})
     monkeypatch.setattr(steam, "buy_orders", lambda s: {})  # every order closed once filled
     books = {"7-A": [[3, 5], [4, 5]], "7-B": [[5, 1], [9, 9]]}
     monkeypatch.setattr(steam, "order_book", lambda s, p, h, tries=6: {"sell": books[h], "listed": 10, "wallet": wallet})
@@ -1358,3 +1358,14 @@ def test_a_sign_in_steam_wont_renew_ends_at_the_sign_in_screen(world):
     f._refused = [time.time() - 3600, time.time() - 1800]
     f._renewal_refused()
     assert not f.session.signed_in and "sign in again" in f.signin_error.lower()
+
+
+def test_the_order_status_check_names_the_items_market_page(monkeypatch):
+    asked = {}
+    monkeypatch.setattr(steam, "get_json", lambda url, **kw: asked.update(kw, url=url) or {"success": 1})
+
+    class Signed:
+        sessionid = "sid"
+        cookies = staticmethod(lambda: {})
+    steam.buy_order_status(Signed, "42", "10-Hero & Co")     # without it Steam answers 400
+    assert asked["headers"]["Referer"].endswith("/market/listings/753/10-Hero%20%26%20Co") and "buy_orderid=42" in asked["url"]

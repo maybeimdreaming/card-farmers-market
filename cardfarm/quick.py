@@ -242,7 +242,7 @@ class QuickBadge:
         for _ in range(8):
             time.sleep(2)
             try:
-                st = steam.buy_order_status(self.session, order["orderid"])
+                st = steam.buy_order_status(self.session, order["orderid"], hash_name)
                 if st.get("quantity_remaining") is not None:
                     got = quantity - int(st["quantity_remaining"])
                 elif st.get("purchased") and not st.get("active"):

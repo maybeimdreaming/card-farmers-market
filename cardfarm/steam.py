@@ -659,9 +659,12 @@ def create_buy_order(session, hash_name, price_each, quantity=1, appid=753, conf
     raise RuntimeError(r.get("message") or "Steam didn't take the buy order")
 
 
-def buy_order_status(session, orderid):
+def buy_order_status(session, orderid, hash_name="", appid=753):
+    """{"active", "purchased", "quantity", "quantity_remaining"} for one of your buy orders. Asked
+    without the item's market page as the Referer, Steam answers 400 whatever the order's state."""
+    page = f"{COMMUNITY}/market/listings/{appid}/{urllib.parse.quote(hash_name)}" if hash_name else f"{COMMUNITY}/market/"
     return get_json(f"{COMMUNITY}/market/getbuyorderstatus/?sessionid={session.sessionid}&buy_orderid={orderid}",
-                    cookies=session.cookies())
+                    cookies=session.cookies(), headers={"Referer": page})
 
 
 def buy_orders(session):
