@@ -5,6 +5,7 @@ import pathlib
 import sys
 import threading
 import time
+import urllib.parse
 
 import pytest
 
@@ -168,7 +169,7 @@ def world(tmp_path, monkeypatch):
     """A signed-in farm whose Steam is a dict we control."""
     (tmp_path / "session.json").write_text(json.dumps({"steamid": "7656", "refresh_token": "x", "access_token": "y"}))
     w = {"cards": [], "pending": set(), "badges": [], "inventories": [], "items": {}, "sold": []}
-    monkeypatch.setattr(steam, "cards_in_inventory", lambda s: list(w["cards"]))
+    monkeypatch.setattr(steam, "cards_in_inventory", lambda s, stock=None: list(w["cards"]))
     monkeypatch.setattr(steam, "pending_listings", lambda s: set(w["pending"]))
     monkeypatch.setattr(steam, "badges", lambda s: [dict(g) for g in w["badges"]])
     monkeypatch.setattr(steam, "inventories", lambda s: list(w["inventories"]))
@@ -545,6 +546,7 @@ def buying_world(monkeypatch, fills=True):
     monkeypatch.setattr(steam, "cancel_buy_order", lambda s, o: log.append(("cancel", o)))
     monkeypatch.setattr(steam, "card_set", lambda s, a: {"level": 0, "cards": []})
     monkeypatch.setattr(steam, "craft_badge", lambda s, a: log.append(("craft", a)))
+    monkeypatch.setattr(steam, "buy_orders", lambda s: {})  # Steam closes an order once it filled or was cancelled
     return log
 
 
@@ -1089,3 +1091,270 @@ def test_quick_badge_waits_while_steam_still_holds_the_last_order(world, monkeyp
     f.quick_badge(7, 5)
     f._do_quick(f.state["queue"][0]["entry"])
     assert placed[2] == placed[3] and log.count(("craft", 7)) == 4 and not f.finishing(7)
+
+
+# --- things that went wrong quietly ------------------------------------------------------------
+def orders_job(world, monkeypatch):
+    log = buying_world(monkeypatch)
+    f = world["make"]()
+    f.update_settings({"levelup_buying": "orders"})
+    f.prices.game_cards = lambda appid: {"7-A": 10, "7-B": 3}
+    f.state["levelup"] = {"level": 9, "xp": 0, "xp_to_next": 200, "maxed": 0, "checked": 1,
+                          "options": [{"appid": 7, "game": "G", "levels": 1, "cost": 13, "forgone": 0, "source": "market",
+                                       "missing_hashes": ["7-A", "7-B"], "missing": ["A", "B"]}]}
+    f.level_up()
+    return f, log, f.state["queue"][0]["entry"]
+
+
+def test_a_buy_order_is_on_record_the_moment_its_placed(world, monkeypatch):
+    f, log, job = orders_job(world, monkeypatch)
+    slow = [True]
+
+    def order(s, h, p, q=1, **kw):
+        if h == "7-B" and slow[0]:
+            raise steam.HttpError(429)
+        log.append(("order", h))
+        return {"orderid": h}
+    monkeypatch.setattr(steam, "create_buy_order", order)
+    with pytest.raises(steam.HttpError):
+        f._do("place", job)
+    assert [o["hash"] for o in f.state["orders"]] == ["7-A"]            # known, and on disk
+    assert [o["hash"] for o in world["make"]().state["orders"]] == ["7-A"]
+    slow[0] = False
+    f._do("place", job)                                                  # the job stayed queued: only the rest goes up
+    assert log == [("order", "7-A"), ("order", "7-B")] and len(f.state["patient"]) == 1
+    assert [o["hash"] for o in f.state["orders"]] == ["7-A", "7-B"]
+
+
+def test_orders_steam_refuses_dont_leave_a_set_waiting_for_nothing(world, monkeypatch):
+    f, log, job = orders_job(world, monkeypatch)
+
+    def refuse(s, h, p, q=1, **kw):
+        raise RuntimeError("You don't have enough funds")
+    monkeypatch.setattr(steam, "create_buy_order", refuse)
+    with pytest.raises(RuntimeError):
+        f._do("place", job)
+    f.state["queue"].clear()
+    assert f.state["orders"] == [] and f.state["patient"] == [] and not f.finishing(7)
+
+
+def test_a_card_with_no_price_is_never_turned_into_gems_unasked(world):
+    f = world["make"]()
+    f.update_settings({"gems": "auto"})
+    f.prices.game_cards = lambda appid: {}       # Steam's search came back empty
+    f.handle(card(), "drop")
+    assert f.state["queue"] == [] and [e["action"] for e in f.state["review"]] == ["gems"]
+    f.prices.game_cards = lambda appid: {"10-Hero": 3}   # a real, low price: gems by the rules
+    f.handle(card(assetid="2"), "drop")
+    assert [j["action"] for j in f.state["queue"]] == ["gems"]
+
+
+def test_a_card_list_cut_short_is_asked_again_soon(tmp_path):
+    p = steam.Prices(str(tmp_path / "prices.json"))
+    pages = [{"results": [{"hash_name": "7-A", "sell_price": 5}], "total_count": 12}, {"results": [], "total_count": 0}]
+    p._ask = lambda url: pages.pop(0)
+    assert p.game_cards(7) == {"7-A": 5} and not p.complete(7)
+    assert p.cache["cards:7"]["ttl"] == p.DOUBT_TTL
+    p._ask = lambda url: {"results": [{"hash_name": "8-A", "sell_price": 5}], "total_count": 1}
+    assert p.game_cards(8) and p.complete(8) and "ttl" not in p.cache["cards:8"]
+
+
+def test_steams_own_items_are_searched_by_name_within_their_game(tmp_path):
+    p, asked = steam.Prices(str(tmp_path / "prices.json")), []
+
+    def ask(url):
+        asked.append(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query))
+        return {"results": [{"hash_name": "1086940-Karlach & Shadowheart", "sell_price": 5}]}
+    p._ask = ask
+    assert p._lowest(753, "1086940-Karlach & Shadowheart") == 5
+    assert asked[0]["query"] == ["Karlach & Shadowheart"] and asked[0]["category_753_Game[]"] == ["tag_app_1086940"]
+    assert p._lowest(730, "AK-47 | Redline") is None and asked[1]["query"] == ["AK-47 | Redline"]
+    assert "category_753_Game[]" not in asked[1]
+
+
+def test_no_price_for_a_sack_of_gems_isnt_remembered_as_one(tmp_path):
+    p = steam.Prices(str(tmp_path / "prices.json"))
+    p.item_stats = lambda appid, name: {"lowest": None, "median": None, "volume": 0}
+    with pytest.raises(RuntimeError, match="sack of gems"):
+        p.gem_sack()
+    assert "sack" not in p.cache
+    p.item_stats = lambda appid, name: {"lowest": 70, "median": 71, "volume": 9}
+    assert p.gem_sack() == 70
+
+
+def test_old_prices_are_dropped_from_the_file(tmp_path):
+    now = time.time()
+    (tmp_path / "prices.json").write_text(json.dumps({
+        "cards:7": {"at": now, "v": {"7-A": 5}}, "cards:8": {"at": now - 30 * 86400, "v": {}},
+        "item:730:Case": {"at": now, "v": 5}}))
+    assert list(steam.Prices(str(tmp_path / "prices.json")).cache) == ["cards:7"]
+    (tmp_path / "prices.json").write_text("{not json")
+    assert steam.Prices(str(tmp_path / "prices.json")).cache == {}
+
+
+def test_an_item_that_got_much_cheaper_goes_back_to_review(world):
+    f = world["make"]()
+    case = {"assetid": "c1", "appid": 730, "context": 2, "amount": 1, "name": "Case", "hash": "Case",
+            "game": "CS2", "icon": "", "kind": "Container"}
+    entry = {"id": "c1", "kind": "item", "item": case, "action": "sell", "detail": {"buyer": 400, "receive": 348}}
+    assert f._do("sell", entry) == 0 and world["sold"] == []           # you were shown $4.00; it's $1.19 now
+    assert [(e["id"], e["detail"]["buyer"]) for e in f.state["items"]["review"]] == [("c1", 119)]
+    f.update_settings({"items_min_cents": 200})
+    with pytest.raises(RuntimeError, match="under your minimum"):
+        f._do("sell", dict(entry, detail={"buyer": 119}))
+    f.update_settings({"items_min_cents": 5})
+    assert f._do("sell", dict(entry, detail={"buyer": 125})) == 1 and world["sold"] == [("c1", rules.received(119))]
+
+
+def test_a_new_item_with_one_odd_cheap_listing_waits_for_you(world):
+    f = world["make"]()
+    world["inventories"] = [{"key": "730/2", "appid": 730, "context": 2, "name": "CS2", "count": 2}]
+    case = {"assetid": "c1", "appid": 730, "context": 2, "amount": 1, "name": "Case", "hash": "Case",
+            "game": "CS2", "icon": "", "kind": "Container"}
+    world["items"]["730/2"] = [case]
+    f.update_settings({"items_inventories": ["730/2"], "items_new": "auto"})
+    f._check_items(manual=False)
+    f.prices.item_stats = lambda appid, name: {"lowest": 40, "median": 119, "volume": 9}
+    world["items"]["730/2"] = [case, dict(case, assetid="c2")]
+    f._check_items(manual=False)
+    assert f.state["queue"] == [] and [e["id"] for e in f.state["items"]["review"]] == ["c2"]
+
+
+def cancelling(world, monkeypatch):
+    """Listings whose items come back as A1, A2, ... when cancelled; counts the inventory reads."""
+    f = world["make"]()
+    stock, reads, removed = [({"assetid": "X", "classid": "Z", "instanceid": "0"}, {})], [], []
+
+    def remove(s, lid):
+        removed.append(lid)
+        stock.append(({"assetid": f"A{len(removed)}", "classid": "C", "instanceid": "0"}, {}))
+    monkeypatch.setattr(steam, "remove_listing", remove)
+    monkeypatch.setattr(steam, "_inventory", lambda s, a, c: reads.append(1) or list(stock))
+    monkeypatch.setattr(market_mod.time, "sleep", lambda x: None)
+    return f, reads, removed
+
+
+def test_a_listing_isnt_repriced_far_under_what_the_check_showed(world, monkeypatch):
+    f, reads, removed = cancelling(world, monkeypatch)
+    f.prices.item_stats = lambda appid, h: {"lowest": 15, "median": 16, "volume": 4}
+    assert f._do_listing("reprice", {"listing": listing(lowest=40, median=41)}) == 0
+    assert removed == [] and world["sold"] == [] and reads == []       # still listed, nothing touched
+    assert f._do_listing("reprice", {"listing": listing(lowest=16, median=17)}) == 1 and removed == ["L1"]
+
+
+def test_cancelling_listings_reads_the_inventory_once_each(world, monkeypatch):
+    f, reads, removed = cancelling(world, monkeypatch)
+    f.state["baseline"] = True
+    world["cards"] = [card(assetid="A1"), card(assetid="A2")]
+    for lid in ("L1", "L2", "L3"):
+        f._do_listing("cancel", {"listing": listing(listingid=lid)})
+    assert removed == ["L1", "L2", "L3"] and len(reads) == 4           # one before the first, one after each
+    assert {"A1", "A2", "A3"} <= set(f.state["seen"]) and [e["id"] for e in f.state["review"]] == ["A1", "A2"]
+
+
+def test_a_cancelled_item_waits_for_review_instead_of_being_listed_again(world, monkeypatch):
+    f, reads, removed = cancelling(world, monkeypatch)
+    f.update_settings({"items_inventories": ["730/2"], "items_new": "auto"})
+    f.state["items"]["seen"]["730/2"] = ["X"]
+    f.state["items"]["inventories"] = [{"key": "730/2", "appid": 730, "context": 2, "name": "CS2", "count": 1}]
+    case = {"assetid": "A1", "appid": 730, "context": 2, "amount": 1, "name": "Case", "hash": "Case",
+            "game": "CS2", "icon": "", "kind": "Container"}
+    monkeypatch.setattr(steam, "sellable_items", lambda stock, a, c, n="": [case])
+    f._do_listing("cancel", {"listing": listing(appid=730, context=2, hash="Case", name="Case", game="CS2")})
+    assert f.state["items"]["seen"]["730/2"] == ["A1", "X"] and f.state["queue"] == []
+    assert [e["id"] for e in f.state["items"]["review"]] == ["A1"]
+
+
+def test_buying_waits_while_steam_still_holds_the_last_order(world, monkeypatch):
+    log = buying_world(monkeypatch)
+    f, tries = world["make"](), []
+
+    def order(s, h, p, q=1, **kw):
+        tries.append(h)
+        if len(tries) == 1:
+            raise RuntimeError("You already have an active buy order for this item.")
+        return {"orderid": h}
+    monkeypatch.setattr(steam, "create_buy_order", order)
+    assert f._buy("10-B", 6) is True and tries == ["10-B", "10-B"]
+
+
+def test_an_order_that_filled_as_it_was_cancelled_counts_as_bought(world, monkeypatch):
+    buying_world(monkeypatch, fills=False)
+    f = world["make"]()
+
+    def gone(s, o):
+        raise RuntimeError("There was a problem cancelling your buy order")
+    monkeypatch.setattr(steam, "cancel_buy_order", gone)
+    assert f._buy("10-B", 6) is True                                   # no longer open: Steam filled it
+    monkeypatch.setattr(steam, "buy_orders", lambda s: {"10-B": 1})    # still open: the cancel really failed
+    monkeypatch.setattr(market_mod.MarketParts, "_until_closed", lambda self, o: None)
+    with pytest.raises(RuntimeError, match="cancelling"):
+        f._buy("10-B", 6)
+
+
+def test_stopping_stops_the_games_at_once(world, monkeypatch):
+    f = world["make"]()
+    f.idler.procs = {10}
+    f.state["idling"] = {"10": {"since": time.time()}}
+    f.update_settings({"farming": False})          # no waiting for the main loop
+    assert f.idler.running() == set() and f.state["idling"] == {} and f.status == "Stopped"
+
+
+def test_starting_a_game_yourself_pauses_without_the_main_loop(world, monkeypatch):
+    f = world["make"]()
+    f.state["games"] = [{"appid": 20, "name": "Other", "drops": 0, "earned": 0}]
+    f.idler.procs = {10}
+    monkeypatch.setattr(farm_mod, "game_you_are_playing", lambda ours: 20)
+    f._pause_if_playing()
+    assert f.idler.running() == set() and f.status == "Paused while you play (Other)"
+
+
+def test_the_market_chores_dont_run_on_the_main_loop(world, monkeypatch):
+    f, ran = world["make"](), []
+    monkeypatch.setattr(farm_mod.Farm, "_sync_sales", lambda self: ran.append(threading.current_thread()))
+    monkeypatch.setattr(farm_mod.Farm, "_check_orders", lambda self: None)
+    f.update_settings({"farming": False})
+    f.tick()
+    for _ in range(100):
+        if ran:
+            break
+        time.sleep(0.02)
+    assert ran and ran[0] is not threading.current_thread()
+
+
+def test_damaged_files_dont_keep_the_app_from_opening(tmp_path, world):
+    f = world["make"]()
+    f.state["stats"]["drops"] = 7
+    f.save()
+    world["make"]()                                 # a good start keeps a copy of what it read
+    (tmp_path / "state.json").write_text('{"seen": ["1"], "stats": {"dro')
+    (tmp_path / "settings.json").write_text("")
+    g = world["make"]()
+    assert g.state["stats"]["drops"] == 7 and g.settings["farming"] is True
+    assert (tmp_path / "state.json.broken").exists() and any("couldn't be read" in h["text"] for h in g.state["history"])
+    (tmp_path / "session.json").write_text("garbage")
+    assert not world["make"]().session.signed_in    # signed out, not stuck
+    assert "couldn't be read" in (tmp_path / "card-farm.log").read_text()
+
+
+def test_a_badges_page_that_fails_isnt_taken_for_games_gone(monkeypatch):
+    page = (HERE / "badges_page.html").read_text()
+    answers = [(200, page), (502, "Bad Gateway")]
+    monkeypatch.setattr(steam, "request", lambda url, **kw: answers.pop(0))
+    monkeypatch.setattr(steam.time, "sleep", lambda x: None)
+
+    class Signed:
+        steamid = "7656"
+        cookies = staticmethod(lambda: {})
+    with pytest.raises(steam.HttpError):
+        steam.badges(Signed)
+
+
+def test_a_sign_in_steam_wont_renew_ends_at_the_sign_in_screen(world):
+    f = world["make"]()
+    f.notify = lambda *a: None
+    f._renewal_refused(); f._renewal_refused(); f._renewal_refused()
+    assert f.session.signed_in                      # three in a minute: could be a hiccup
+    f._refused = [time.time() - 3600, time.time() - 1800]
+    f._renewal_refused()
+    assert not f.session.signed_in and "sign in again" in f.signin_error.lower()

@@ -56,7 +56,8 @@ def spend_limit(cost):
 
 
 class QuickBadge:
-    """Mixed into Farm (uses its state, lock, session, prices, log and queue)."""
+    """Mixed into Farm (uses its state, lock, session, prices, log and queue, and the market
+    parts' buy orders)."""
 
     def _quick(self):
         return self.state.setdefault("quick", quick_state())
@@ -232,30 +233,11 @@ class QuickBadge:
         self.log(f"Quick badge: {pick['game']} to level {plan['target']}, {plan['buying']} cards for about ${plan['cost'] / 100:.2f}")
         self.save()
 
-    def _order_for(self, hash_name, price, quantity):
-        """Place a buy order. Steam allows one open order per item and keeps a just-filled or
-        just-cancelled one open for a few seconds, so "you already have an active buy order" is
-        waited out (half a minute at most)."""
-        for attempt in range(7):
-            try:
-                return self._place_order(hash_name, price, quantity, job="badge")
-            except RuntimeError as e:
-                if "active buy order" not in str(e) or attempt == 6:
-                    raise
-                time.sleep(5)
-
-    def _until_closed(self, orderid):
-        """Wait (20 s at most) until Steam no longer lists the order as open."""
-        for _ in range(10):
-            if orderid not in steam.buy_orders(self.session):
-                return
-            time.sleep(2)
-
     def _buy_many(self, hash_name, price, quantity):
         """Buy `quantity` at up to `price` each through one buy order; how many came in. Whatever
         hasn't filled within a few seconds is cancelled (those listings sold to someone else).
         Returns once Steam has closed the order, so the next one for the same card can go in."""
-        order = self._order_for(hash_name, price, quantity)
+        order = self._order_for(hash_name, price, quantity, job="badge")
         got = 0
         for _ in range(8):
             time.sleep(2)
@@ -272,7 +254,8 @@ class QuickBadge:
             if got >= quantity:
                 self._until_closed(order["orderid"])
                 return quantity
-        steam.cancel_buy_order(self.session, order["orderid"])
+        if not self._cancel_rest(order["orderid"]):  # nothing left to cancel: the rest filled just now
+            got = quantity
         self._until_closed(order["orderid"])
         return got
 

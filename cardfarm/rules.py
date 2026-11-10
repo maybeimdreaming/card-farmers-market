@@ -1,7 +1,7 @@
 """Settings, and what to do with a card (sell it, turn it into gems, or keep it) or another item."""
-import json
-import os
 import re
+
+from . import files
 
 DEFAULTS = {
     "theme": "auto",             # auto (the system's light or dark) | light | dark | pink
@@ -40,9 +40,9 @@ MODES = ("auto", "review", "off")
 
 def load_settings(path):
     s = dict(DEFAULTS)
-    if os.path.exists(path):
-        with open(path) as f:
-            s.update(clean(json.load(f)))  # settings that are gone (games_at_once) are dropped
+    saved = files.read_json(path, backup=True)
+    if isinstance(saved, dict):
+        s.update(clean(saved))  # settings that are gone (games_at_once) are dropped
     return s
 
 

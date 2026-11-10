@@ -3,13 +3,12 @@ the two actions (list on the market, turn into gems)."""
 import calendar
 import html
 import json
-import os
 import re
 import threading
 import time
 import urllib.parse
 
-from . import http
+from . import files, http
 from .http import HttpError, get_json, post_json, request
 from .http import paused_until as http_paused_until
 
@@ -49,9 +48,11 @@ def badges(session):
     games = parse_badges(first)
     for p in range(2, page_count(first) + 1):
         time.sleep(1)
-        status, page = request(f"{base}&p={p}", cookies=session.cookies())
-        if status == 200:
-            games += parse_badges(page)
+        url = f"{base}&p={p}"
+        status, page = request(url, cookies=session.cookies())
+        if status != 200:  # half the list would look like games gone and drops missed: all of it, or again later
+            raise HttpError(status, page[:300], url)
+        games += parse_badges(page)
     seen, out = set(), []
     for g in games:
         if g["appid"] not in seen:
@@ -98,10 +99,11 @@ def _is_card(desc):
     return tags(desc).get("item_class", {}).get("internal_name") == "item_class_2"
 
 
-def cards_in_inventory(session):
-    """Every trading card: [{assetid, appid, name, game, hash, foil, marketable, icon, goo}]"""
+def cards_in_inventory(session, stock=None):
+    """Every trading card: [{assetid, appid, name, game, hash, foil, marketable, icon, goo}]
+    (stock: the Steam inventory as _inventory gave it a moment ago, to save reading it again)."""
     out = []
-    for a, x in _inventory(session, *CARDS):
+    for a, x in _inventory(session, *CARDS) if stock is None else stock:
         if not _is_card(x):
             continue
         t = tags(x)
@@ -142,8 +144,12 @@ def inventories(session):
 def items_in_inventory(session, appid, context, name=""):
     """Everything in one inventory that can go on the market now, cards aside (Card Farm handles
     those). Stacks (e.g. gems) come as one entry with their amount."""
+    return sellable_items(_inventory(session, appid, context), appid, context, name)
+
+
+def sellable_items(stock, appid, context, name=""):
     out = []
-    for a, x in _inventory(session, appid, context):
+    for a, x in stock:
         if not x.get("marketable") or ((appid, context) == CARDS and _is_card(x)):
             continue
         out.append({"assetid": a["assetid"], "appid": appid, "context": context, "amount": int(a.get("amount") or 1),
@@ -168,23 +174,29 @@ class Prices:
     """Lowest asking prices (by market hash name) and gem values, cached for a few hours. One fetch
     at a time, whichever part of Card Farm asks, to stay gentle with the market."""
     TTL = 6 * 3600
+    DOUBT_TTL = 30 * 60   # an answer that looks cut short (no cards at all, fewer than Steam counted) is asked again sooner
+    KEEP = 14 * 86400     # prices older than this are dropped from the file (old ones still order "priciest first")
+    SAVE_EVERY = 30       # seconds between writes of the file, however many lookups there are
+    KINDS = ("cards", "stats", "gems", "sack")
     GAP = 4  # seconds between market requests: Steam answers faster runs of them with 429 "too many requests"
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.RLock()
-        self._last = self._last_page = 0.0
+        self._last = self._last_page = self._saved = 0.0
         self.session = None  # the farm's sign-in, set by the farm
-        try:
-            self.cache = json.load(open(path))
-        except (OSError, ValueError):
-            self.cache = {}
+        saved, now = files.read_json(path, {}, say=lambda text: None), time.time()
+        self.cache = {k: v for k, v in (saved if isinstance(saved, dict) else {}).items()
+                      if k.split(":")[0] in self.KINDS and isinstance(v, dict) and now - v.get("at", 0) < self.KEEP}
 
-    def _save(self):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(dict(self.cache), f)
-        os.replace(tmp, self.path)
+    def _save(self, now=False):
+        if not now and time.time() - self._saved < self.SAVE_EVERY:
+            return  # goes out with a later lookup; losing a few cached prices to a crash costs nothing
+        self._saved = time.time()
+        try:
+            files.write_json(self.path, dict(self.cache))
+        except OSError:
+            pass  # the prices are still in memory
 
     def _ask(self, url):
         """One market request, at least GAP seconds after the previous one (callers hold the lock).
@@ -200,10 +212,10 @@ class Prices:
 
     def _fresh(self, key):
         hit = self.cache.get(key)
-        return hit if hit and time.time() - hit["at"] < self.TTL else None
+        return hit if hit and time.time() - hit["at"] < hit.get("ttl", self.TTL) else None
 
-    def _remember(self, key, value):
-        self.cache[key] = {"at": time.time(), "v": value}
+    def _remember(self, key, value, ttl=None):
+        self.cache[key] = {"at": time.time(), "v": value, **({"ttl": ttl} if ttl else {})}
         self._save()
         return value
 
@@ -213,7 +225,7 @@ class Prices:
         with self.lock:
             if self._fresh(key):
                 return self.cache[key]["v"]
-            prices, start, total = {}, 0, 1
+            prices, start, total, counted = {}, 0, 1, 0
             while start < total:  # pages are 10 long whatever count asks for
                 q = urllib.parse.urlencode({"appid": 753, "norender": 1, "start": start, "count": 10,
                                             "category_753_Game[]": f"tag_app_{appid}",
@@ -222,7 +234,15 @@ class Prices:
                 for it in d.get("results", []):
                     prices[it["hash_name"]] = it["sell_price"]
                 total, start = d.get("total_count", 0), start + 10
-            return self._remember(key, prices)
+                counted = max(counted, total)
+            # Steam now and then answers a search with nothing, or stops short: cards missing from
+            # the list would look like cards nobody sells, so such an answer is only trusted briefly
+            return self._remember(key, prices, self.DOUBT_TTL if len(prices) < max(counted, 1) else None)
+
+    def complete(self, appid):
+        """Whether the last game_cards answer for this game had every card Steam counted."""
+        hit = self.cache.get(f"cards:{appid}")
+        return not (hit and hit.get("ttl"))
 
     def known_cards(self, appid):
         """game_cards from the cache only (None when it hasn't been looked up lately): no request."""
@@ -246,11 +266,27 @@ class Prices:
             stats = recent_sales(self._ask(f"{COMMUNITY}/market/pricehistory/?{q}").get("prices") or [])
             stats["lowest"] = None
             if lowest:
-                q = urllib.parse.urlencode({"appid": appid, "norender": 1, "start": 0, "count": 10, "query": hash_name,
-                                            "search_descriptions": 0})
-                found = self._ask(f"{COMMUNITY}/market/search/render/?{q}").get("results") or []
-                stats["lowest"] = next((r["sell_price"] for r in found if r.get("hash_name") == hash_name), None)
-            return self._remember(key, stats)
+                stats["lowest"] = self._lowest(appid, hash_name)
+            # sold today yet nobody listing one: more likely a search that came back empty
+            doubt = lowest and stats["lowest"] is None and stats.get("volume")
+            return self._remember(key, stats, self.DOUBT_TTL if doubt else None)
+
+    def _lowest(self, appid, hash_name):
+        """The cheapest asking price, from a search for the exact item. Steam's own items (backgrounds,
+        emoticons, packs, gems) are named "<game's appid>-<name>" and the search only knows the
+        name: asked for the whole thing it finds nothing, so it's asked for the name among that
+        game's items (the name alone, "Blue", would match hundreds)."""
+        ask = {"appid": appid, "norender": 1, "start": 0, "count": 10, "query": hash_name, "search_descriptions": 0}
+        game, dash, name = hash_name.partition("-")
+        ours = appid == 753 and dash and game.isdigit() and name
+        if ours:
+            ask.update({"query": name, "category_753_Game[]": f"tag_app_{game}"})
+        for attempt in range(2):
+            found = self._ask(f"{COMMUNITY}/market/search/render/?{urllib.parse.urlencode(ask)}").get("results") or []
+            price = next((r["sell_price"] for r in found if r.get("hash_name") == hash_name), None)
+            if price is not None or not ours or game != "753" or attempt:
+                return price
+            ask.pop("category_753_Game[]")  # Steam's own things (a sack of gems) may not sit under a game
 
     def gems(self, appid, item_type=None, foil=False):
         """Gems for one card. Without the inventory's exact item type, the cheapest item of the
@@ -274,7 +310,13 @@ class Prices:
             if self._fresh("sack"):
                 return self.cache["sack"]["v"]
             stats = self.item_stats(753, "753-Sack of Gems")
-            return self._remember("sack", stats["lowest"] or stats["median"])
+            price = stats["lowest"] or stats["median"]
+            if not price:  # an empty answer isn't a price: the last one known, or say so
+                price = (self.cache.get("sack") or {}).get("v")
+                if not price:
+                    raise RuntimeError("Steam didn't give a price for a sack of gems")
+                return price
+            return self._remember("sack", price)
 
 
 def recent_sales(points, hours=24, now=None):
@@ -626,6 +668,8 @@ def buy_orders(session):
     """Your buy orders still waiting on the market: {orderid: quantity still wanted}."""
     d = _patient(lambda: get_json(f"{COMMUNITY}/market/mylistings/render/?query=&start=0&count=10&norender=1",
                                   cookies=session.cookies()))
+    if not d.get("success"):  # an answer without the list isn't "no orders": they'd all look filled
+        raise RuntimeError("Steam didn't show your buy orders")
     return {str(o.get("buy_orderid")): int(o.get("quantity_remaining") or 0) for o in d.get("buy_orders") or []}
 
 

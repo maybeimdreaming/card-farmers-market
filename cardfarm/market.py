@@ -161,37 +161,80 @@ class MarketParts:
                 self._enqueue(action, {"id": l["listingid"], "kind": "listing", "listing": l})
         self.save()
 
+    STOCK_FOR = 30  # seconds an inventory read while cancelling one listing still serves the next
+
+    def _stock_before(self, l):
+        """Asset ids in the listing's inventory before it's cancelled. Cancelling a run of listings,
+        the read that found the last one back serves here, not a whole new read each time."""
+        key = (l["appid"], l["context"])
+        at, ids = getattr(self, "_stock_ids", {}).get(key, (0, None))
+        if time.time() - at < self.STOCK_FOR:
+            return ids
+        return {a["assetid"] for a, _ in steam._inventory(self.session, *key)}
+
     def _returned(self, listing, before):
-        """The item a cancelled listing put back in the inventory."""
+        """The item a cancelled listing put back in the inventory: (its asset id, the inventory)."""
         for _ in range(5):
             time.sleep(3)
             stock = steam._inventory(self.session, listing["appid"], listing["context"])
             back = [a for a, x in stock if a["assetid"] not in before and str(a["classid"]) == listing["classid"]
                     and str(a["instanceid"]) == listing["instanceid"]]
             if back:
-                return back[0]["assetid"]
+                self._stock_ids = {(listing["appid"], listing["context"]): (time.time(), {a["assetid"] for a, _ in stock})}
+                return back[0]["assetid"], stock
         raise RuntimeError("the cancelled item didn't come back to the inventory yet")
 
     def _do_listing(self, action, e):
         l = e["listing"]
-        before = {a["assetid"] for a, _ in steam._inventory(self.session, l["appid"], l["context"])}
+        buyer = None
+        if action != "cancel":  # priced before anything is touched
+            going = rules.realistic(self._stats(l["appid"], l["hash"]))
+            shown = rules.realistic(l)  # what the listings check showed when you asked for this
+            if going and shown and going < shown * (1 - FALL):
+                self.log(f"Left the listing for {l['name']} alone: it now goes for ${going / 100:.2f}, well under the "
+                         f"${shown / 100:.2f} the check showed; check your listings again to reprice it", "warn")
+                return 0
+            buyer = max(rules.asking_price(going, self.settings) or l["buyer"], self._floor(l))
+        before = self._stock_before(l)
         steam.remove_listing(self.session, l["listingid"])
-        assetid = self._returned(l, before)
-        with self.lock:  # Card Farm put it back itself: not a new card
-            self.state["seen"] = sorted(set(self.state["seen"]) | {assetid})
+        assetid, stock = self._returned(l, before)
+        is_card = (l["appid"], l["context"]) == steam.CARDS and l["game"].endswith("Trading Card")
+        key = f"{l['appid']}/{l['context']}"
+        with self.lock:  # Card Farm put it back itself: not a new card, not a new item
+            if is_card:
+                self.state["seen"] = sorted(set(self.state["seen"]) | {assetid})
+            elif key in self.state["items"]["seen"]:
+                self.state["items"]["seen"][key] = sorted(set(self.state["items"]["seen"][key]) | {assetid})
         if action == "cancel":
             self.log(f"Cancelled the listing for {l['name']}; it's back in your inventory")
-            if (l["appid"], l["context"]) == steam.CARDS and l["game"].endswith("Trading Card"):
-                card = next((c for c in steam.cards_in_inventory(self.session) if c["assetid"] == assetid), None)
+            if is_card:
+                card = next((c for c in steam.cards_in_inventory(self.session, stock) if c["assetid"] == assetid), None)
                 if card:
                     self.handle(card, "existing")  # back under your rules, in the review list
+            else:
+                self._review_returned(l, assetid, stock)
             return 0
-        going = rules.realistic(self._stats(l["appid"], l["hash"]))
-        buyer = max(rules.asking_price(going, self.settings) or l["buyer"], self._floor(l))
         receive = rules.received(buyer)
         steam.sell(self.session, assetid, receive, l["appid"], l["context"])
         self.log(f"Relisted {l['name']} for ${rules.buyer_pays(receive) / 100:.2f} (was ${l['buyer'] / 100:.2f})", "sell")
         return 1
+
+    def _review_returned(self, l, assetid, stock):
+        """An item (not a card) whose listing was cancelled waits for your review, whatever "new
+        items" is set to: listing it again by itself would only repeat the listing that didn't sell."""
+        name = next((i["name"] for i in self.state["items"]["inventories"] if i["key"] == f"{l['appid']}/{l['context']}"), "")
+        item = next((i for i in steam.sellable_items(stock, l["appid"], l["context"], name) if i["assetid"] == assetid), None)
+        if not item:
+            return
+        try:
+            action, detail = rules.decide_item(item, self._stats(l["appid"], l["hash"]), self.settings)
+        except Exception:
+            return  # the next "Check items" offers it
+        if action == "sell":
+            with self.lock:
+                box = self.state["items"]["review"]
+                if not any(x["id"] == assetid for x in box):
+                    box.append({"id": assetid, "kind": "item", "item": item, "action": "sell", "detail": detail, "at": time.time()})
 
     # --- gems ---------------------------------------------------------------------------------------
     def check_gems(self):
@@ -200,8 +243,9 @@ class MarketParts:
     def _check_gems(self):
         try:
             stock = steam.gem_stock(self.session)
+            sack = self.prices.gem_sack()  # a market lookup: not while holding the lock the window reads through
             with self.lock:
-                self.state["gems"] = dict(stock, checked=time.time(), sack_price=self.prices.gem_sack())
+                self.state["gems"] = dict(stock, checked=time.time(), sack_price=sack)
         except Exception as e:
             self.log(f"Couldn't read your gems: {e}", "warn")
 
@@ -230,9 +274,9 @@ class MarketParts:
     def check_boosters(self):
         self._in_background("boosters", self._check_boosters)
 
-    def _gem_value(self, gems):
+    def _gem_value(self, gems, sack=None):
         """What gems fetch once sold as sacks (after Steam's fees)."""
-        return gems * self.prices.gem_sack() / 1000 / 1.15
+        return gems * (sack or self.prices.gem_sack()) / 1000 / 1.15
 
     def _check_boosters(self):
         """Price every booster you can make (one a few seconds, so the first full pass takes a
@@ -240,6 +284,7 @@ class MarketParts:
         try:
             options, tradable = steam.booster_options(self.session)
             stock = steam.gem_stock(self.session)
+            sack = self.prices.gem_sack()  # looked up once, outside the lock
             gems = tradable + stock["sacks"] * 1000  # sacks can be unpacked when a pack needs them
             now = time.time()
             with self.lock:
@@ -267,23 +312,23 @@ class MarketParts:
                     known[o["appid"]] = dict(o, **stats, priced=time.time())
                 else:
                     known[o["appid"]].update(unavailable=o["unavailable"], available_at=o["available_at"], gems=o["gems"])
+                offers = sorted((self._booster_offer(x, sack) for x in known.values()),
+                                key=lambda x: (not x["worth"], -(x["profit"] if x["profit"] is not None else -999)))
                 with self.lock:
-                    b["options"] = sorted((self._booster_offer(x) for x in known.values()),
-                                          key=lambda x: (not x["worth"], -(x["profit"] if x["profit"] is not None else -999)))
-                    b["done"] = i + 1
+                    b["options"], b["done"] = offers, i + 1
         except Exception as e:
             self.log(f"Couldn't check booster prices: {e}", "warn")
         finally:
             self.progress.pop("boosters", None)
 
-    def _booster_offer(self, o):
+    def _booster_offer(self, o, sack=None):
         """Valued on what the pack really sells for: the lower of its cheapest listing and its median
         sale over the last day (a stale, inflated ask doesn't count), and only if it sells at all."""
         lowest, median, volume = o.get("lowest"), o.get("median"), o.get("volume", 0)
         price = min(p for p in (lowest, median) if p) if (lowest or median) else None
         buyer = rules.asking_price(price, self.settings)
         receive = rules.received(buyer) if buyer else 0
-        cost = round(self._gem_value(o["gems"]), 1)
+        cost = round(self._gem_value(o["gems"], sack), 1)
         sells = volume >= self.settings["booster_min_sales"]
         profit = round(receive - cost, 1) if buyer else None
         return dict(o, buyer=buyer, receive=receive, cost=cost, sells=sells, profit=profit,
@@ -367,6 +412,8 @@ class MarketParts:
                 missing = {h: p for h, p in full.items() if h not in g["owned"]}
                 if not full or len(missing) == len(full):  # nothing of it, or Steam lists no cards for it
                     continue
+                if not self.prices.complete(appid):  # Steam's answer stopped short: the set would look smaller than it is
+                    continue
                 cost = sum(p for p in missing.values())
                 worth = sum(rules.received(p) for h, p in full.items() if h in g["owned"])
                 offers.append({"appid": appid, "game": g["game"], "have": len(full) - len(missing), "of": len(full),
@@ -430,22 +477,56 @@ class MarketParts:
         finally:
             self.progress.pop(job, None)
 
+    def _order_for(self, hash_name, price, quantity=1, job="sets"):
+        """Place a buy order. Steam allows one open order per item and keeps a just-filled or
+        just-cancelled one open for a few seconds, so "you already have an active buy order" is
+        waited out (half a minute at most)."""
+        for attempt in range(7):
+            try:
+                return self._place_order(hash_name, price, quantity, job=job)
+            except RuntimeError as e:
+                if "active buy order" not in str(e) or attempt == 6:
+                    raise
+                time.sleep(5)
+
+    def _until_closed(self, orderid):
+        """Wait (20 s at most) until Steam no longer lists the order as open."""
+        for _ in range(10):
+            if orderid not in steam.buy_orders(self.session):
+                return
+            time.sleep(2)
+
+    def _cancel_rest(self, orderid):
+        """Cancel what's left of an order; False when there was nothing left to cancel (it filled
+        in the moment before: Steam refuses to cancel an order it has closed)."""
+        try:
+            steam.cancel_buy_order(self.session, orderid)
+            return True
+        except RuntimeError:
+            if orderid in steam.buy_orders(self.session):
+                raise
+            return False
+
     def _buy(self, hash_name, price):
         """Buy one at `price` through a buy order; True once Steam says it was bought. An order
-        that doesn't fill within a few seconds (the listing sold) is cancelled again."""
-        order = self._place_order(hash_name, price)
+        that doesn't fill within a few seconds (the listing sold) is cancelled again. Returns once
+        Steam has closed the order, so another for the same card can go in."""
+        order = self._order_for(hash_name, price)
+        bought = False
         for _ in range(8):
             time.sleep(2)
             try:
-                if steam.buy_order_status(self.session, order["orderid"]).get("purchased"):
-                    return True
+                bought = bool(steam.buy_order_status(self.session, order["orderid"]).get("purchased"))
             except steam.HttpError:
                 # Steam's status check turns away orders that filled at once; an order that's no
                 # longer open has filled (nothing here cancels one before this point)
-                if order["orderid"] not in steam.open_buy_orders(self.session):
-                    return True
-        steam.cancel_buy_order(self.session, order["orderid"])
-        return False
+                bought = order["orderid"] not in steam.open_buy_orders(self.session)
+            if bought:
+                break
+        else:
+            bought = not self._cancel_rest(order["orderid"])
+        self._until_closed(order["orderid"])
+        return bought
 
     def _do_set(self, e):
         """Price every missing card (cheapest listing that isn't yours) and stop before buying
@@ -529,6 +610,8 @@ class MarketParts:
                     break
                 full = {h: p for h, p in prices.items() if "(Foil" not in h}
                 if len(full) < 5 or any(not p for p in full.values()):  # every set has 5 to 15 cards
+                    continue
+                if not self.prices.complete(appid):
                     continue
                 options.append({"appid": appid, "game": self._game_name(appid), "levels": 5 - me["badges"].get(appid, 0),
                                 "cost": sum(full.values()), "forgone": 0, "source": "market",
@@ -686,6 +769,7 @@ class HeldBoosters:
         return 0
 
 
+FALL = 0.15  # a price this far under the one you were shown isn't listed at without asking again
 ORDER_DISCOUNT = 0.15  # buy orders go this far under the cheapest ask (never under Steam's 3c minimum)
 
 
@@ -700,24 +784,56 @@ class PatientBuying:
 
     def _do_orders(self, e):
         """One buy order per card (several of the same card for several levels of a set)."""
-        crafts, wanted = e["crafts"], {}
+        crafts, wanted, job = e["crafts"], {}, e["id"]
         for c in crafts:
             for h in c["missing_hashes"]:
                 wanted[h] = wanted.get(h, 0) + 1
-        placed = []
-        for h, quantity in wanted.items():
-            game = int(h.split("-", 1)[0])
-            price = order_price(self.prices.game_cards(game).get(h))
-            order = self._place_order(h, price, quantity)
-            placed.append({"orderid": order["orderid"], "hash": h, "price": price, "quantity": quantity, "placed": time.time()})
+        # Each order goes on record (and to disk) the moment Steam takes it: an order this app
+        # lost track of would still fill from your wallet with nothing here to cancel it. A job
+        # that stopped partway (Steam asked to slow down) goes on with the orders still to place.
         with self.lock:
-            self.state.setdefault("orders", []).extend(placed)
-            self.state.setdefault("patient", []).extend(
-                {"appid": c["appid"], "game": c["game"], "hashes": c["missing_hashes"]} for c in crafts)
+            orders, patient = self.state.setdefault("orders", []), self.state.setdefault("patient", [])
+            if not any(w.get("job") == job for w in patient):
+                patient.extend({"appid": c["appid"], "game": c["game"], "hashes": c["missing_hashes"], "job": job} for c in crafts)
+            have = {o["hash"] for o in orders if o.get("job") == job}
+        try:
+            for h, quantity in wanted.items():
+                if h in have:
+                    continue
+                game = int(h.split("-", 1)[0])
+                price = order_price(self.prices.game_cards(game).get(h))
+                order = self._order_for(h, price, quantity)
+                with self.lock:
+                    self.state["orders"].append({"orderid": order["orderid"], "hash": h, "price": price, "quantity": quantity,
+                                                 "placed": time.time(), "job": job})
+                self.save()
+        except Exception as err:
+            if not (isinstance(err, steam.HttpError) and err.status == 429):  # (a slow-down: the job stays queued)
+                self._orders_stopped(job, len(wanted))
+            raise
+        with self.lock:
+            placed = [o for o in self.state["orders"] if o.get("job") == job]
         cost = sum(o["price"] * o["quantity"] for o in placed)
         self.log(f"Placed {len(placed)} buy orders for {len(crafts)} badge level(s), ${cost / 100:.2f} if they all fill")
         self._next_orders = 0
         return 0
+
+    def _orders_stopped(self, job, wanted):
+        """Steam refused an order partway. The ones it took stay up and on the Badges tab (they can
+        still fill and complete sets); with none taken, the sets are let go again."""
+        with self.lock:
+            placed = sum(1 for o in self.state["orders"] if o.get("job") == job)
+            if placed:
+                self.log(f"Only {placed} of {wanted} buy orders went up; those stay on the market. Cancel them on the "
+                         "Badges tab if you don't want them, or run Level up again for the rest", "warn")
+                return
+            mine = [w for w in self.state["patient"] if w.get("job") == job]
+            self.state["patient"] = [w for w in self.state["patient"] if w.get("job") != job]
+            for appid in {w["appid"] for w in mine}:
+                busy = any(w["appid"] == appid for w in self.state["patient"]) or any(
+                    j["entry"].get("kind") == "set" and j["entry"]["offer"]["appid"] == appid for j in self.state["queue"])
+                if not busy:
+                    self.state["finishing"].pop(str(appid), None)
 
     def _check_orders(self):
         """Which orders filled, which sets are complete (craft them), which orders waited too long."""

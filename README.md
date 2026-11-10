@@ -103,7 +103,7 @@ starts Card Farmer's Market minimised.)
 
 Settings, the review lists and your Steam sign-in are kept in `~/.local/share/card-farm` on Linux,
 `%APPDATA%\Card Farm` on Windows and `~/Library/Application Support/Card Farm` on macOS; the sign-in
-file is readable only by you. `farm-history.json` there lists every card the app has farmed (when, which, foil or not, and the version). `CARD_FARM_DATA` changes the folder.
+file is readable only by you. `farm-history.json` there lists every card the app has farmed (when, which, foil or not, and the version). `card-farm.log` there keeps what the Activity log showed and what went wrong behind it (it starts over at 1 MB): the file to attach when you report a problem. A settings or state file that got damaged is set aside as `<name>.broken` and the last good copy is used. `CARD_FARM_DATA` changes the folder.
 
 ## How the decision works
 

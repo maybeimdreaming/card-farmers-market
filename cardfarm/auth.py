@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.parse
 
+from . import files
 from .http import post_for_cookies, post_json
 
 API = "https://api.steampowered.com/IAuthenticationService"
@@ -22,6 +23,8 @@ def _claims(jwt):
     return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
 
 
+NO_RENEWAL = "wouldn't renew the sign-in"  # in the error when Steam refuses a new access token
+
 class Session:
     def __init__(self, path):
         self.path = path
@@ -29,8 +32,8 @@ class Session:
         self.sessionid = secrets.token_hex(12)
         self.qr = None  # pending sign-in: {client_id, request_id, url, interval, expires}
         self._renewing = threading.Lock()  # the farm, market lookups and background jobs all ask for cookies
-        if os.path.exists(path):
-            saved = json.load(open(path))
+        saved = files.read_json(path)  # a damaged one: signed out, sign in again
+        if isinstance(saved, dict):
             for k in ("steamid", "account", "refresh_token", "access_token", "sessionid"):
                 setattr(self, k, saved.get(k) or getattr(self, k))
 
@@ -39,10 +42,8 @@ class Session:
         return bool(self.refresh_token)
 
     def save(self):
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump({k: getattr(self, k) for k in
-                       ("steamid", "account", "refresh_token", "access_token", "sessionid")}, f)
+        files.write_json(self.path, {k: getattr(self, k) for k in
+                                     ("steamid", "account", "refresh_token", "access_token", "sessionid")}, private=True)
 
     def sign_out(self):
         self.steamid = self.account = self.refresh_token = self.access_token = None
@@ -91,7 +92,7 @@ class Session:
                       {"refresh_token": self.refresh_token, "steamid": self.steamid}).get("response", {})
         token = r.get("access_token") or self._renew_like_a_browser()
         if not token:
-            raise RuntimeError("Steam wouldn't renew the sign-in; sign in again")
+            raise RuntimeError(f"Steam {NO_RENEWAL}; sign in again")
         self.access_token = token
         self.refresh_token = r.get("refresh_token") or self.refresh_token
         self.save()

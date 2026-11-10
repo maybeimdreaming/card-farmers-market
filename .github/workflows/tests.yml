@@ -1,0 +1,24 @@
+# The tests, on every push and pull request (release.yml runs them again before it builds).
+name: tests
+on:
+  push:
+    branches: [main, next]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest tests -q

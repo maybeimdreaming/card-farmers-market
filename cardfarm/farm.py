@@ -8,8 +8,8 @@ import threading
 import time
 import traceback
 
-from . import http, market, qr, quick, rules, steam, update
-from .auth import Session
+from . import files, http, market, qr, quick, rules, steam, update
+from .auth import NO_RENEWAL, Session
 from .idler import Idler, game_you_are_playing, steam_pid
 
 BADGES_EVERY = 10 * 60
@@ -23,6 +23,10 @@ BULK_MINUTES = 120           # games played less than this idle together first: 
 BULK_MAX = 32                # ...up to this many at once (Steam's own limit)
 EXPLAIN_WAIT = 20 * 60  # the badges page shows a drop a minute or two after the inventory does
 OWED_FOR = 2 * 3600     # a drop count no card turned up for is forgotten after this
+WATCH_EVERY = 10        # seconds between looks at whether you started playing something yourself
+RENEW_TRIES = 3         # Steam refusing to renew the sign-in this often, over RENEW_OVER, means signed out
+RENEW_OVER = 30 * 60
+ITEM_SPREAD = 0.7       # a new item whose cheapest listing is under this share of its usual price waits for review
 
 
 def fresh_state():
@@ -57,13 +61,15 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         self.prices.session = self.session
         self.idler = Idler(data_dir)
         self.state = fresh_state()
-        if os.path.exists(self._path("state.json")):
-            with open(self._path("state.json")) as f:
-                saved = json.load(f)
+        woes = []  # said once the state (and so the Activity list) is there
+        saved = files.read_json(self._path("state.json"), backup=True, say=woes.append)
+        if isinstance(saved, dict):
             self.state.update(saved)
             self.state["stats"] = dict(fresh_state()["stats"], **saved.get("stats", {}))
             self.state["items"] = dict(fresh_state()["items"], **saved.get("items", {}))
         self.state["idling"] = {}  # the idlers went away with the last run
+        for woe in woes:
+            self.log(woe, "warn")
         if self.session.signed_in:
             self._for_account()
         self.status = "starting"
@@ -78,6 +84,9 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         self._next_badges = self._next_inventory = 0
         self._next_items = time.time() + ITEMS_EVERY
         self._soon = False
+        self._chores_running = threading.Lock()
+        self._checking_items = threading.Lock()
+        self._refused = []  # when Steam wouldn't renew the sign-in
         self._steam = None
         self._poller = None
         self._qr_svg = (None, None)
@@ -97,39 +106,40 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         """farm-history.json: every card this app farmed (number, when, card, game, foil, version), one
         entry per drop, kept for good; the garden's flowers are these."""
         path = self._path("farm-history.json")
-        try:
-            history = json.load(open(path))
-        except (OSError, ValueError):
+        history = files.read_json(path, [], say=self.note)
+        if not isinstance(history, list):
             history = []
         history.append({"n": number, "at": round(time.time()), "appid": card["appid"], "card": card["name"],
                         "game": card["game"], "foil": bool(card["foil"]), "version": update.VERSION})
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(history, f, indent=0)
-        os.replace(tmp, path)
+        files.write_json(path, history, indent=0)
 
     def _path(self, name):
         return os.path.join(self.data, name)
 
     def save(self):
         with self.lock:
-            tmp = self._path("state.json.tmp")
-            with open(tmp, "w") as f:
-                json.dump(self.state, f)
-            os.replace(tmp, self._path("state.json"))
+            files.write_json(self._path("state.json"), self.state)
 
     def log(self, text, kind="info"):
         with self.lock:
             self.state["history"].insert(0, {"at": time.time(), "kind": kind, "text": text})
             del self.state["history"][300:]
+        self.note(text)
+
+    def note(self, text):
+        """For card-farm.log only (in the data folder): what doesn't belong in the Activity list
+        but tells what went wrong afterwards."""
         print(text, flush=True)
+        files.log_line(self._path("card-farm.log"), text)
 
     # --- settings / sign-in ------------------------------------------------------------------
     def update_settings(self, patch):
         with self.lock:
+            was = self.settings["farming"]
             self.settings.update(rules.clean(patch))
-            with open(self._path("settings.json"), "w") as f:
-                json.dump(self.settings, f, indent=1)
+            files.write_json(self._path("settings.json"), self.settings, indent=1)
+        if was and not self.settings["farming"]:  # at once: the main loop may be busy reading from Steam
+            self._idle_none("Stopped")
         self.poke()
 
     def start_sign_in(self):
@@ -177,6 +187,21 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             self.state["idling"] = {}
         self.log("Signed out")
 
+    def _renewal_refused(self):
+        """Steam wouldn't renew the sign-in. Once can be a hiccup; again and again means the sign-in
+        ended (after months, or you signed this device out), and only signing in again helps: back
+        to the sign-in screen, instead of an error that repeats for good."""
+        now = time.time()
+        self._refused = [t for t in self._refused if now - t < 6 * 3600] + [now]
+        if len(self._refused) < RENEW_TRIES or now - self._refused[0] < RENEW_OVER:
+            return
+        self._refused = []
+        self.sign_out()
+        self.signin_error = "Steam ended the sign-in. Scan a new code to sign in again."
+        self.log("Steam wouldn't renew the sign-in any more; sign in again to go on", "warn")
+        if self.settings["notify"]:
+            self.notify("Signed out of Steam", "Open Card Farmer's Market and sign in again to go on farming.")
+
     def poke(self):
         self._wake.set()
 
@@ -187,6 +212,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
     # --- main loop ---------------------------------------------------------------------------
     def run(self):
         threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._watch, daemon=True).start()
         backoff = 0  # minutes; grows while Steam keeps saying "too many requests"
         while True:
             wait = 30
@@ -203,7 +229,9 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                     self.log(self.error, "warn")
             except Exception as e:
                 self.error = str(e)
-                traceback.print_exc()
+                self.note(traceback.format_exc())
+                if NO_RENEWAL in str(e):
+                    self._renewal_refused()
             self.save()
             self._wake.wait(wait)
             self._wake.clear()
@@ -215,27 +243,10 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             try:
                 self.update = update.check()
             except Exception as e:
-                print(f"Update check failed: {e}", flush=True)
+                self.note(f"Update check failed: {e}")
         if not self.session.signed_in:
             return self._idle_none("Sign in to start")
-        if s["items_new"] != "off" and time.time() >= self._next_items:
-            self._next_items = time.time() + ITEMS_EVERY
-            self._check_items(manual=False)
-        if time.time() >= self._next_sales:
-            self._next_sales = time.time() + market.SALES_EVERY
-            try:
-                self._sync_sales()
-            except Exception as e:
-                print(f"Sales check failed: {e}", flush=True)
-        if time.time() >= self._next_orders:
-            self._next_orders = time.time() + 30 * 60
-            try:
-                self._check_orders()
-            except Exception as e:
-                print(f"Buy order check failed: {e}", flush=True)
-        if s["cancel_after_days"] and time.time() >= self._next_listings:
-            self._next_listings = time.time() + market.LISTINGS_EVERY
-            self.check_listings()
+        threading.Thread(target=self._chores, daemon=True).start()
         if not s["farming"]:
             return self._idle_none("Stopped")
         pid = steam_pid()
@@ -264,6 +275,52 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             self._next_inventory = min(self._next_inventory if self._soon else float("inf"),
                                        time.time() + INVENTORY_EVERY)
         self._price_one_game()
+
+    def _chores(self):
+        """The regular market reads (new items, sales, buy orders, old listings). On a thread of
+        their own: they can take minutes, and starting, stopping and pausing games mustn't wait."""
+        if not self._chores_running.acquire(blocking=False):
+            return  # the last round is still at it
+        try:
+            s = self.settings
+            if s["items_new"] != "off" and time.time() >= self._next_items:
+                self._next_items = time.time() + ITEMS_EVERY
+                self._check_items(manual=False)
+            if time.time() >= self._next_sales:
+                self._next_sales = time.time() + market.SALES_EVERY
+                try:
+                    self._sync_sales()
+                except Exception as e:
+                    self.note(f"Sales check failed: {e}")
+            if time.time() >= self._next_orders:
+                self._next_orders = time.time() + 30 * 60
+                try:
+                    self._check_orders()
+                except Exception as e:
+                    self.note(f"Buy order check failed: {e}")
+            if s["cancel_after_days"] and time.time() >= self._next_listings:
+                self._next_listings = time.time() + market.LISTINGS_EVERY
+                self.check_listings()
+        finally:
+            self._chores_running.release()
+
+    def _watch(self):
+        """Pausing for a game you start yourself doesn't wait for the main loop, which can be minutes
+        into reading your inventory or prices."""
+        while True:
+            time.sleep(WATCH_EVERY)
+            try:
+                self._pause_if_playing()
+            except Exception as e:
+                self.note(f"Couldn't check what you're playing: {e}")
+
+    def _pause_if_playing(self):
+        ours = self.idler.running()
+        if not (ours and self.settings["farming"] and self.settings["pause_when_playing"]):
+            return
+        playing = game_you_are_playing(ours)
+        if playing:
+            self._idle_none(f"Paused while you play ({self._name(playing)})")
 
     def _starting(self, what):
         """Say what's going on while nothing is idling yet (the first minutes after starting)."""
@@ -334,7 +391,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             try:
                 free = steam.free_to_play(appid)
             except Exception as e:  # tried again with the next badges check
-                print(f"Free-to-play check failed: {e}", flush=True)
+                self.note(f"Free-to-play check failed: {e}")
                 return
             with self.lock:
                 known[str(appid)] = free
@@ -351,7 +408,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         try:
             minutes = steam.playtime(self.session)
         except Exception as e:  # without it every game counts as past the bulk stage
-            print(f"Playtime check failed: {e}", flush=True)
+            self.note(f"Playtime check failed: {e}")
             return
         with self.lock:
             self.state["playtime"] = {str(g["appid"]): minutes[g["appid"]] for g in self.state["games"]
@@ -513,7 +570,8 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                         del foils[:-300]  # more than the garden ever shows
                     self._farmed_one(card["appid"])
         with self.lock:
-            self.state["seen"] = sorted((seen & ids) | handled)
+            added = set(self.state["seen"]) - seen  # put back meanwhile (a cancelled listing): still not new
+            self.state["seen"] = sorted((seen & ids) | handled | (added & ids))
             self.state["unexplained"] = {a: t for a, t in self.state["unexplained"].items() if a in ids}
 
     def _drop_pending_from_review(self):
@@ -549,6 +607,9 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             action = "sell"
         mode = self.settings.get(action, "off") if action in ("sell", "gems") else "off"
         if why != "drop" and mode != "off":
+            mode = "review"
+        if action == "gems" and mode == "auto" and card.get("marketable", True) and not detail.get("buyer"):
+            # no price isn't a low price: Steam may just not have shown one. Gems can't be undone.
             mode = "review"
         if action == "keep" or mode == "off":
             if why != "existing":
@@ -636,59 +697,69 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
     def _check_items(self, manual):
         """manual: every sellable item in the chosen inventories goes to review. On the timer
         (items_new on), only items that weren't there last time count, and 'auto' lists them."""
+        if not self._checking_items.acquire(blocking=False):
+            return  # one check at a time (yours and the timer's would undo each other's lists)
         try:
-            found = steam.inventories(self.session)
-            chosen = [i for i in found if i["key"] in self.settings["items_inventories"]]
-            with self.lock:
-                self.state["items"]["inventories"] = found
-            if not chosen:
-                if manual:
-                    self.log("Found your inventories; pick which ones may be sold from")
-                return
-            pending = self._drop_pending_from_review()
-            skip = self._queued_ids() | pending
-            offered = held = 0
-            for inv in chosen:
-                stock = steam.items_in_inventory(self.session, inv["appid"], inv["context"], inv["name"])
-                ids = {i["assetid"] for i in stock}
-                with self.lock:
-                    seen = self.state["items"]["seen"]
-                    before = set(seen[inv["key"]]) if inv["key"] in seen else None
-                    seen[inv["key"]] = sorted(ids)
-                    box = self.state["items"]
-                    box["review"] = [e for e in box["review"]
-                                     if e["item"]["context"] != inv["context"] or e["item"]["appid"] != inv["appid"]
-                                     or e["id"] in ids]
-                for item in stock:
-                    new = before is not None and item["assetid"] not in before
-                    if item["assetid"] in skip or not (manual or new):
-                        continue
-                    try:
-                        action, detail = rules.decide_item(item, self.prices.item_stats(item["appid"], item["hash"]),
-                                                           self.settings)
-                    except Exception as e:
-                        self.log(f"Couldn't price {item['name']}: {e}", "warn")
-                        continue
-                    if action == "keep":
-                        held += 1
-                        continue
-                    entry = {"id": item["assetid"], "kind": "item", "item": item, "action": "sell",
-                             "detail": detail, "at": time.time()}
-                    if new and not manual and self.settings["items_new"] == "auto":
-                        self.log(f"New item: {item['name']} ({inv['name']})")
-                        self._enqueue("sell", entry)
-                    else:
-                        with self.lock:
-                            if not any(e["id"] == entry["id"] for e in box["review"]):
-                                box["review"].append(entry)
-                        offered += 1
-            with self.lock:
-                self.state["items"]["checked"] = time.time()
-            if manual or offered:
-                self.log(f"Items checked: {offered} to review"
-                         + (f", {held} left alone (nobody selling, not selling lately, under your minimum or kept)" if held else ""))
+            self._check_items_now(manual)
         except Exception as e:
             self.log(f"Couldn't check your items: {e}", "warn")
+        finally:
+            self._checking_items.release()
+
+    def _check_items_now(self, manual):
+        found = steam.inventories(self.session)
+        chosen = [i for i in found if i["key"] in self.settings["items_inventories"]]
+        with self.lock:
+            self.state["items"]["inventories"] = found
+        if not chosen:
+            if manual:
+                self.log("Found your inventories; pick which ones may be sold from")
+            return
+        pending = self._drop_pending_from_review()
+        skip = self._queued_ids() | pending
+        offered = held = 0
+        for inv in chosen:
+            stock = steam.items_in_inventory(self.session, inv["appid"], inv["context"], inv["name"])
+            ids = {i["assetid"] for i in stock}
+            with self.lock:
+                seen = self.state["items"]["seen"]
+                before = set(seen[inv["key"]]) if inv["key"] in seen else None
+                seen[inv["key"]] = sorted(ids)
+                box = self.state["items"]
+                box["review"] = [e for e in box["review"]
+                                 if e["item"]["context"] != inv["context"] or e["item"]["appid"] != inv["appid"]
+                                 or e["id"] in ids]
+            for item in stock:
+                new = before is not None and item["assetid"] not in before
+                if item["assetid"] in skip or not (manual or new):
+                    continue
+                try:
+                    stats = self.prices.item_stats(item["appid"], item["hash"])
+                    action, detail = rules.decide_item(item, stats, self.settings)
+                except Exception as e:
+                    self.log(f"Couldn't price {item['name']}: {e}", "warn")
+                    continue
+                if action == "keep":
+                    held += 1
+                    continue
+                entry = {"id": item["assetid"], "kind": "item", "item": item, "action": "sell",
+                         "detail": detail, "at": time.time()}
+                # one listing far under what it usually sells for is somebody's mistake or bait,
+                # not the price: that one is yours to judge
+                odd = stats.get("lowest") and stats.get("median") and stats["lowest"] < stats["median"] * ITEM_SPREAD
+                if new and not manual and self.settings["items_new"] == "auto" and not odd:
+                    self.log(f"New item: {item['name']} ({inv['name']})")
+                    self._enqueue("sell", entry)
+                else:
+                    with self.lock:
+                        if not any(e["id"] == entry["id"] for e in box["review"]):
+                            box["review"].append(entry)
+                    offered += 1
+        with self.lock:
+            self.state["items"]["checked"] = time.time()
+        if manual or offered:
+            self.log(f"Items checked: {offered} to review"
+                     + (f", {held} left alone (nobody selling, not selling lately, under your minimum or kept)" if held else ""))
 
     # --- doing it ---------------------------------------------------------------------------------
     def _enqueue(self, action, entry):
@@ -755,6 +826,18 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             buyer = rules.asking_price(rules.realistic(self.prices.item_stats(it["appid"], it["hash"])), self.settings)
             if not buyer:
                 raise RuntimeError("nobody is selling or buying one now, so there's no price to go by")
+            if buyer < self.settings["items_min_cents"]:
+                raise RuntimeError(f"it now goes for ${buyer / 100:.2f}, under your minimum; left in your inventory")
+            shown = e.get("detail", {}).get("buyer")
+            if shown and buyer < shown * (1 - market.FALL):
+                # you agreed to another price: it goes back for a second look at today's
+                with self.lock:
+                    box = self.state["items"]["review"]
+                    if not any(x["id"] == e["id"] for x in box):
+                        box.append(dict(e, detail=dict(e["detail"], buyer=buyer, receive=rules.received(buyer)), at=time.time()))
+                self.log(f"Didn't list {it['name']}: it now goes for ${buyer / 100:.2f}, not the ${shown / 100:.2f} "
+                         "you were shown. It's back in your review list at today's price", "warn")
+                return 0
             receive = rules.received(buyer)
             steam.sell(self.session, it["assetid"], receive, it["appid"], it["context"], it["amount"])
             with self.lock:
