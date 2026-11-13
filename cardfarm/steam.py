@@ -680,9 +680,9 @@ def buy_order_status(session, orderid, hash_name="", appid=753):
 
 
 def buy_orders(session):
-    """Your buy orders still waiting on the market: {orderid: quantity still wanted}. Asked with the
-    largest page Steam allows (100): with count=10, more than 10 orders might have been cut short,
-    and every order missing from the answer would look filled."""
+    """Your buy orders still waiting on the market: {orderid: quantity still wanted}. Steam pages
+    only the listings in this answer: every buy order comes back whatever count asks for (checked
+    live 2026-11-13 with 12 open orders and count=10). An order missing from it would look filled."""
     d = _patient(lambda: get_json(f"{COMMUNITY}/market/mylistings/render/?query=&start=0&count=100&norender=1",
                                   cookies=session.cookies()))
     if not d.get("success"):  # an answer without the list isn't "no orders": they'd all look filled
