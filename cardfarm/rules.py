@@ -10,6 +10,10 @@ DEFAULTS = {
     "pause_when_playing": True,  # step aside while you play something yourself
     "stall_minutes": 90,         # no drop for this long: restart the idler, then move on (0: never)
     "skip_free_to_play": True,   # free-to-play games (CS2) drop cards for in-game purchases while played, not idled
+    "pause_on_battery": True,    # a laptop off its charger doesn't idle games
+    "hours_from": 0,             # farm only from this hour of the day...
+    "hours_to": 0,               # ...until this one (the same two: all day)
+    "sale_rewards": True,        # during Steam sales: explore the Discovery Queue and claim the free sticker
     "sell": "auto",              # auto: list it | review: ask first | off: never sell
     "gems": "review",            # auto | review | off
     "pricing": "match",          # match the lowest listing, or undercut it by a cent
@@ -23,6 +27,7 @@ DEFAULTS = {
     "items_min_cents": 5,        # don't list an item for less than this (what a buyer pays)
     "items_keep": [],            # market names never listed, e.g. a skin you use
     "items_min_sales": 1,        # only offer items that sold at least this many times in the last day (0: any)
+    "items_gems": "review",      # backgrounds and emoticons worth more as gems: auto (new ones) | review | off
     # your listings
     "reprice_after_hours": 24,   # only reprice listings at least this old
     "reprice_gap_cents": 2,      # ...and only when someone sells for more than this below yours
@@ -59,7 +64,9 @@ def clean(patch):
                    "cancel_after_days", "set_budget_cents", "booster_min_sales", "items_min_sales", "levelup_target",
                    "levelup_budget_cents", "order_days"):
             out[k] = max(0, int(v))
-        elif k in ("sell", "gems", "items_new") and v in MODES:
+        elif k in ("hours_from", "hours_to"):
+            out[k] = min(23, max(0, int(v)))
+        elif k in ("sell", "gems", "items_new", "items_gems") and v in MODES:
             out[k] = v
         elif k == "order" and v in ("value", "most", "fewest"):
             out[k] = v
@@ -136,17 +143,35 @@ def realistic(stats):
     return min(prices) if prices else None
 
 
-def decide_item(item, stats, settings):
-    """('sell', {buyer, receive, volume, median}) or ('keep', {why, ...}) for an item that isn't a card.
-    stats: {"lowest", "median", "volume"} from the market."""
+def gem_worth(gems, sack_cents):
+    """What gems fetch once packed into sacks and sold (after Steam's fees), in cents."""
+    return gems * sack_cents / 1000 / 1.15
+
+
+def decide_item(item, stats, settings, gems=0, sack_cents=None):
+    """('sell', {buyer, receive, volume, median}), ('gems', {gems, gem_value, ...}) or ('keep', {why, ...})
+    for an item that isn't a card. stats: {"lowest", "median", "volume"} from the market. gems: what
+    the item grinds into (backgrounds and emoticons; 0 for anything else), worth gem_worth of them
+    when that beats selling it (or it can't be sold)."""
     if item["hash"] in settings["items_keep"]:
         return "keep", {"why": "on your keep list"}
     seen = {"volume": stats.get("volume", 0), "median": stats.get("median")}
+    use_gems = bool(gems and sack_cents and settings["items_gems"] != "off")
+    value = round(gem_worth(gems, sack_cents), 2) if use_gems else 0
+    as_gems = ("gems", {"gems": gems, "gem_value": value, **seen})
+    if not item.get("marketable", True):
+        return as_gems if use_gems else ("keep", {"why": "can't be sold", "buyer": None, **seen})
     buyer = asking_price(realistic(stats), settings)
     if not buyer:
-        return "keep", {"why": "nobody is selling one", "buyer": None, **seen}
+        return (as_gems[0], dict(as_gems[1], buyer=None)) if use_gems else ("keep", {"why": "nobody is selling one", "buyer": None, **seen})
+    if use_gems and received(buyer) <= value:
+        return "gems", dict(as_gems[1], buyer=buyer, receive=received(buyer))
     if stats.get("volume", 0) < settings["items_min_sales"]:
+        if use_gems:
+            return "gems", dict(as_gems[1], buyer=buyer, receive=received(buyer))
         return "keep", {"why": "doesn't sell (too few sales in the last day)", "buyer": buyer, **seen}
     if buyer < settings["items_min_cents"] or received(buyer) < 1:
+        if use_gems:
+            return "gems", dict(as_gems[1], buyer=buyer, receive=received(buyer))
         return "keep", {"why": "under your minimum", "buyer": buyer, "receive": received(buyer), **seen}
-    return "sell", {"buyer": buyer, "receive": received(buyer), **seen}
+    return "sell", {"buyer": buyer, "receive": received(buyer), **({"gems": gems, "gem_value": value} if use_gems else {}), **seen}

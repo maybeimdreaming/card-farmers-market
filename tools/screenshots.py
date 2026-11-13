@@ -114,6 +114,19 @@ def demo(farm):
                 "game": "Counter-Strike 2", "icon": "", "kind": kind}
         st["items"]["review"].append({"id": f"i{i}", "kind": "item", "item": item, "action": "sell", "at": now,
                                       "detail": {"buyer": price, "receive": rules.received(price), "volume": vol, "median": price + 2}})
+    bg = {"assetid": "i9", "appid": 753, "context": 6, "amount": 1, "name": "Harbor at Dusk (Profile Background)",
+          "hash": "1001-Harbor at Dusk", "game": "Steam", "icon": "", "kind": "Profile Background", "marketable": True, "goo": [1001, 3, 0]}
+    st["items"]["review"].append({"id": "i9", "kind": "item", "item": bg, "action": "gems", "at": now,
+                                  "detail": {"buyer": 4, "receive": 2, "volume": 3, "median": 4, "gems": 80, "gem_value": 4.73}})
+    st["items"]["worth"] = {"cents": 4127, "priced": 52, "of": 53, "at": now - 900}
+    st["holding"] = {f"{1000 + i}-Card {k}": [1000 + i, 1 + (k % 2)] for i in range(4) for k in range(5)}
+    st["sale"] = {"on": True, "checked": now - 1200, "day": "", "queues": 3, "sticker": True, "stickers": 4}
+    st["alerts"] = [{"id": "753/1001-Harbor at Dusk/above", "appid": 753, "hash": "1001-Harbor at Dusk", "name": "Harbor at Dusk",
+                     "game": "Tidewater", "icon": "", "when": "above", "cents": 20, "armed": True, "price": 12, "lowest": 13,
+                     "checked": now - 1500, "fired": 0, "added": now - 86400},
+                    {"id": "730/Dreams & Nightmares Case/below", "appid": 730, "hash": "Dreams & Nightmares Case",
+                     "name": "Dreams & Nightmares Case", "game": "Counter-Strike 2", "icon": "", "when": "below", "cents": 120,
+                     "armed": False, "price": 117, "lowest": 115, "checked": now - 1500, "fired": now - 1500, "added": now - 86400}]
     lst = lambda i, name, buyer, lowest, days, verdict, vol=6: {
         "listingid": f"L{i}", "assetid": f"A{i}", "appid": 753, "context": 6, "hash": f"1000-{name}", "name": name,
         "game": "Ember Hollow Trading Card", "icon": "", "classid": "c", "instanceid": "0", "receive": rules.received(buyer),
@@ -121,7 +134,9 @@ def demo(farm):
     st["listings"] = {"checked": now - 600, "items": [
         lst(1, "Ash Gate", 14, 9, 3, "undercut"), lst(2, "Cinder Path", 11, 8, 6, "undercut"), lst(3, "Low Tide", 7, 7, 2, "ok"),
         lst(4, "Kite String", 9, None, 0.2, "young", None), lst(5, "Rust Bolt", 4, None, 4, "floor", None)]}
-    st["sales"] = [{"at": now - rnd.randint(0, 20 * 86400), "listingid": str(i), "name": f"Card {i}", "hash": "",
+    st["sales_all"] = True
+    st["idled"]["1005"] = 3600 * 140
+    st["sales"] = [{"at": now - rnd.randint(0, (20 if i < 100 else 200) * 86400), "listingid": str(i), "name": f"Card {i}", "hash": "",
                     "game": rnd.choice(["Ember Hollow Trading Card", "Tidewater Trading Card", "Night Bus Trading Card"]),
                     "appid": rnd.choice([1000, 1001, 1004]), "received": rnd.randint(2, 30)} for i in range(140)]
     st["sales"].sort(key=lambda x: -x["at"])

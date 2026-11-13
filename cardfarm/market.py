@@ -2,11 +2,16 @@
 (reprice, cancel), your sales, gems into sacks, booster packs worth more than their gems, and card
 sets you hold most of (what the rest costs; craft once complete). Anything that changes the account only happens when the person
 asks for it on the page (or switched on a rule for it), through the farm's saved queue."""
+import csv
+import os
+import subprocess
+import sys
 import time
 
 from . import rules, steam
 
 SALES_EVERY = 30 * 60
+SALES_KEPT = 5000           # sales remembered, newest first
 LISTINGS_EVERY = 6 * 3600   # only when "cancel unsold after" is on
 BOOSTER_TTL = 24 * 3600
 
@@ -46,15 +51,71 @@ class MarketParts:
     def _sync_sales(self):
         first = not self.state["sales_until"]
         new = steam.sales_since(self.session, self.state["sales_until"], most=500 if first else 1000)
+        if new:
+            with self.lock:
+                self.state["sales"] = (new + self.state["sales"])[:SALES_KEPT]
+                self.state["sales_until"] = max(s["at"] for s in new)
+        if not self.state.get("sales_all"):
+            self._older_sales()
         if not new:
             return
-        with self.lock:
-            self.state["sales"] = (new + self.state["sales"])[:5000]
-            self.state["sales_until"] = max(s["at"] for s in new)
         if not first and self.settings["notify_sales"]:
             got = sum(s["received"] for s in new)
             names = ", ".join(s["name"] for s in new[:3]) + (" and more" if len(new) > 3 else "")
             self.notify(f"Sold {len(new)} for ${got / 100:.2f}", names)
+
+    def _older_sales(self):
+        """Once: go back through your whole market history (up to SALES_KEPT sales), so the all-time
+        figures and the export start from your first sale, not from when this app first looked."""
+        every = steam.sales_since(self.session, 0, most=SALES_KEPT * 2)
+        with self.lock:
+            key = lambda s: (s["listingid"], s["at"], s["received"])
+            have = {key(s) for s in self.state["sales"]}
+            merged = self.state["sales"] + [s for s in every if key(s) not in have]
+            self.state["sales"] = sorted(merged, key=lambda s: -s["at"])[:SALES_KEPT]
+            self.state["sales_all"] = True
+            if self.state["sales"]:
+                self.state["sales_until"] = max(self.state["sales_until"], self.state["sales"][0]["at"])
+
+    def lifetime(self):
+        """All-time figures: by month, the best games, and card sales per hour of idling."""
+        names = {i["appid"]: i["name"].split(" · ")[0] for i in self.state["items"]["inventories"]}
+        names.update({g["appid"]: g["name"] for g in self.state["games"]})
+        months, games, card_cents = {}, {}, 0
+        for s in self.state["sales"]:
+            m = months.setdefault(time.strftime("%Y-%m", time.localtime(s["at"])), [0, 0])
+            m[0] += 1
+            m[1] += s["received"]
+            game = names.get(s["appid"]) or s["game"].removesuffix(" Trading Card").removesuffix(" Foil") or "?"
+            g = games.setdefault(game, [0, 0])
+            g[0] += 1
+            g[1] += s["received"]
+            if s["game"].endswith("Trading Card"):
+                card_cents += s["received"]
+        idled = sum(self.state["idled"].values()) + sum(b.get("secs", 0) for b in self.state.get("bulk", {}).values())
+        return {"months": sorted(months.items(), reverse=True)[:24], "games": sorted(games.items(), key=lambda kv: -kv[1][1])[:12],
+                "best_month": max(months.items(), key=lambda kv: kv[1][1], default=None),
+                "idled_hours": round(idled / 3600, 1), "card_cents": card_cents,
+                "per_hour": round(card_cents / (idled / 3600)) if idled >= 3600 else None,
+                "complete": bool(self.state.get("sales_all"))}
+
+    def export_sales(self):
+        """Every sale tracked, as a CSV file in your Downloads folder (or the data folder), which
+        is then shown in the file manager. Returns {"path"}."""
+        folder = os.path.expanduser("~/Downloads")
+        folder = folder if os.path.isdir(folder) else self.data
+        path = os.path.join(folder, f"card-farmers-market-sales-{time.strftime('%Y-%m-%d')}.csv")
+        with self.lock:
+            sales = list(self.state["sales"])
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["Sold at", "Item", "Kind", "Game appid", "You received (USD)"])
+            for s in sorted(sales, key=lambda s: s["at"]):
+                w.writerow([time.strftime("%Y-%m-%d %H:%M", time.localtime(s["at"])), s["name"], s["game"], s["appid"],
+                            f"{s['received'] / 100:.2f}"])
+        self.log(f"Saved {len(sales)} sales to {path}")
+        _show_file(path)
+        return {"path": path}
 
     def sales_summary(self):
         """Totals for the page: today, 7 and 30 days, by day (14 days) and by game (30 days)."""
@@ -679,6 +740,19 @@ class MarketParts:
 
 LEVELUP_PAGES = 15   # the market's 150 cheapest cards
 LEVELUP_GAMES = 25   # sets priced from them, at most
+
+
+def _show_file(path):
+    """Show a file in the system's file manager (best effort)."""
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", path], creationflags=0x08000000)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def cents_text(c):

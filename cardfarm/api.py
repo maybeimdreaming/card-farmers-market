@@ -36,7 +36,7 @@ def route(farm, path, body):
         return farm.update_settings(body)
     if path in ("/api/review", "/api/items/review"):  # {"ids": [...] | "all", "action": ...}
         items = path == "/api/items/review"
-        allowed = ("sell", "keep", "always") if items else ("sell", "gems", "keep", "suggested")
+        allowed = ("sell", "gems", "keep", "always", "suggested") if items else ("sell", "gems", "keep", "suggested")
         if body.get("action") not in allowed:
             raise ValueError("unknown action")
         ids = body.get("ids")
@@ -97,6 +97,14 @@ def route(farm, path, body):
         return farm.price_badge(int(body["appid"]), body.get("game"))
     if path == "/api/badges/go":  # {"appid", "target"}
         return farm.quick_badge(int(body["appid"]), int(body["target"]))
+    if path == "/api/alerts/search":  # {"text"}
+        return farm.search_alerts(body.get("text"))
+    if path == "/api/alerts/add":  # {"item": {appid, hash, name, game, icon}, "when": above|below, "cents"}
+        return farm.add_alert(body["item"], body.get("when"), body.get("cents", 0))
+    if path == "/api/alerts/remove":  # {"id"}
+        return farm.remove_alert(str(body["id"]))
+    if path == "/api/sales/export":
+        return farm.export_sales()
     if path == "/api/update":
         return farm.install_update()
     if path == "/api/refresh":

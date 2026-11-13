@@ -9,7 +9,7 @@ import urllib.parse
 
 import pytest
 
-from cardfarm import api, farm as farm_mod, idler, market as market_mod, qr, rules, steam
+from cardfarm import api, extras, farm as farm_mod, idler, market as market_mod, power, qr, rules, steam
 
 HERE = pathlib.Path(__file__).parent
 
@@ -175,6 +175,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(steam, "inventories", lambda s: list(w["inventories"]))
     monkeypatch.setattr(steam, "items_in_inventory", lambda s, a, c, n="": list(w["items"].get(f"{a}/{c}", [])))
     monkeypatch.setattr(steam, "sell", lambda s, asset, receive, *a: w["sold"].append((asset, receive)))
+    monkeypatch.setattr(steam, "sale_status", lambda s: {"sale": False, "can_claim": False, "next_claim": 0, "queue_task": None})
 
     def make():
         f = farm_mod.Farm(str(tmp_path))
@@ -1369,3 +1370,257 @@ def test_the_order_status_check_names_the_items_market_page(monkeypatch):
         cookies = staticmethod(lambda: {})
     steam.buy_order_status(Signed, "42", "10-Hero & Co")     # without it Steam answers 400
     assert asked["headers"]["Referer"].endswith("/market/listings/753/10-Hero%20%26%20Co") and "buy_orderid=42" in asked["url"]
+
+
+
+# --- when to farm ------------------------------------------------------------------------------------
+def test_farming_hours_wrap_past_midnight(monkeypatch):
+    at = lambda hour: time.mktime((2026, 11, 13, hour, 30, 0, 0, 0, -1))
+    assert power.in_hours(0, 0, at(3)) and power.in_hours(5, 5, at(17))      # the same two: all day
+    assert power.in_hours(9, 17, at(9)) and not power.in_hours(9, 17, at(17))
+    assert power.in_hours(22, 7, at(23)) and power.in_hours(22, 7, at(6)) and not power.in_hours(22, 7, at(12))
+
+
+def test_a_laptop_on_battery_is_told_apart_from_a_desktop_with_a_wireless_mouse(tmp_path):
+    def supply(name, **files):
+        (tmp_path / name).mkdir()
+        for k, v in files.items():
+            (tmp_path / name / k).write_text(v + "\n")
+    supply("hidpp_battery_0", type="Battery", scope="Device", status="Discharging")  # the mouse
+    assert power._linux(str(tmp_path)) is False
+    supply("BAT0", type="Battery", status="Discharging")
+    supply("AC", type="Mains", online="0")
+    assert power._linux(str(tmp_path)) is True
+    (tmp_path / "AC" / "online").write_text("1\n")
+    assert power._linux(str(tmp_path)) is False
+
+
+def test_farming_waits_for_its_hours_and_for_the_charger(world, monkeypatch):
+    f = world["make"]()
+    f.idler.procs = {10}
+    f.state["idling"] = {"10": {"since": time.time()}}
+    monkeypatch.setattr(farm_mod, "steam_pid", lambda: 1)
+    monkeypatch.setattr(farm_mod.Farm, "_chores", lambda self: None)
+    monkeypatch.setattr(power, "in_hours", lambda a, b, now=None: False)
+    f.update_settings({"hours_from": 22, "hours_to": 7})
+    f.tick()
+    assert f.idler.running() == set() and "farming hours (22:00 to 7:00)" in f.status
+    monkeypatch.setattr(power, "in_hours", lambda a, b, now=None: True)
+    monkeypatch.setattr(power, "on_battery", lambda: True)
+    f.idler.procs = {10}
+    f.tick()
+    assert f.idler.running() == set() and f.status.startswith("Paused on battery")
+    assert rules.clean({"hours_from": 30, "hours_to": -2}) == {"hours_from": 23, "hours_to": 0}
+
+
+# --- backgrounds and emoticons into gems --------------------------------------------------------------
+BG = {"hash": "1001-Harbor", "name": "Harbor", "marketable": True, "goo": (1001, 3, 0)}
+
+
+def test_an_item_whose_gems_are_worth_more_is_suggested_for_gems():
+    st = lambda lowest, median=None, volume=5: {"lowest": lowest, "median": median, "volume": volume}
+    # 80 gems at 70c a sack are worth about 4.9c; a 4c sale gets you 2c
+    action, d = rules.decide_item(BG, st(4), S, gems=80, sack_cents=70)
+    assert action == "gems" and d["gems"] == 80 and d["receive"] == 2
+    assert rules.decide_item(BG, st(40), S, gems=80, sack_cents=70)[0] == "sell"
+    assert rules.decide_item(BG, st(40, volume=0), S, gems=80, sack_cents=70)[0] == "gems"  # doesn't sell
+    assert rules.decide_item(dict(BG, marketable=False), st(None), S, gems=80, sack_cents=70)[0] == "gems"
+    assert rules.decide_item(BG, st(4), dict(S, items_gems="off"), gems=80, sack_cents=70)[0] == "keep"
+    assert rules.decide_item(dict(BG, marketable=False), st(None), S)[0] == "keep"  # no gem value known
+
+
+def test_inventory_items_carry_their_gem_lookup():
+    desc = lambda marketable, goo, cls="item_class_3": {
+        "marketable": marketable, "name": "Harbor", "market_hash_name": "1001-Harbor", "icon_url": "",
+        "tags": [{"category": "item_class", "internal_name": cls}],
+        "owner_actions": [{"link": f"javascript:GetGooValue( '%contextid%', '%assetid%', 1001, 3, 0 )"}] if goo else []}
+    stock = [({"assetid": "1"}, desc(True, True)), ({"assetid": "2"}, desc(False, True)), ({"assetid": "3"}, desc(False, False)),
+             ({"assetid": "4"}, desc(True, True, "item_class_2"))]  # a card: the Cards tab's
+    got = steam.sellable_items(stock, 753, 6, "Steam")
+    assert [(i["assetid"], i["marketable"], i["goo"]) for i in got] == [("1", True, (1001, 3, 0)), ("2", False, (1001, 3, 0))]
+
+
+def test_items_worth_more_as_gems_wait_for_review_and_grind_when_you_say(world, monkeypatch):
+    f = world["make"]()
+    bg = {"assetid": "b1", "appid": 753, "context": 6, "amount": 1, "name": "Harbor", "hash": "1001-Harbor",
+          "game": "Steam", "icon": "", "kind": "Profile Background", "marketable": True, "goo": (1001, 3, 0)}
+    world["inventories"] = [{"key": "753/6", "appid": 753, "context": 6, "name": "Steam", "count": 1}]
+    world["items"] = {"753/6": [bg]}
+    f.update_settings({"items_inventories": ["753/6"]})
+    f.prices.item_stats = lambda appid, name: {"lowest": 4, "median": 4, "volume": 3}
+    f.prices.gems = lambda *a: 80
+    f._check_items(manual=True)
+    entry = f.state["items"]["review"][0]
+    assert entry["action"] == "gems" and entry["detail"]["gems"] == 80
+    assert f.state["items"]["worth"] == dict(f.state["items"]["worth"], cents=2, priced=1, of=1)
+    ground = []
+    monkeypatch.setattr(steam, "grind", lambda s, appid, asset, gems: ground.append((appid, asset, gems)) or gems)
+    f.decide_review({"b1"}, "suggested", items=True)
+    f._do("gems", f.state["queue"][0]["entry"])
+    assert ground == [(1001, "b1", 80)] and f.state["stats"]["gems"] == 80
+
+
+def test_a_new_background_is_ground_by_itself_only_on_auto(world):
+    f = world["make"]()
+    bg = lambda a: {"assetid": a, "appid": 753, "context": 6, "amount": 1, "name": "Harbor", "hash": "1001-Harbor",
+                    "game": "Steam", "icon": "", "kind": "Profile Background", "marketable": True, "goo": (1001, 3, 0)}
+    world["inventories"] = [{"key": "753/6", "appid": 753, "context": 6, "name": "Steam", "count": 1}]
+    world["items"] = {"753/6": [bg("b1")]}
+    f.update_settings({"items_inventories": ["753/6"], "items_new": "review"})
+    f.prices.item_stats = lambda appid, name: {"lowest": 4, "median": 4, "volume": 3}
+    f.prices.gems = lambda *a: 80
+    f._check_items(manual=False)                      # the first look only learns what's there
+    world["items"]["753/6"].append(bg("b2"))
+    f._check_items(manual=False)
+    assert [e["id"] for e in f.state["items"]["review"]] == ["b2"] and not f.state["queue"]
+    f.update_settings({"items_gems": "auto"})
+    world["items"]["753/6"].append(bg("b3"))
+    f._check_items(manual=False)
+    assert [(j["action"], j["entry"]["id"]) for j in f.state["queue"]] == [("gems", "b3")]
+
+
+# --- Steam sales ----------------------------------------------------------------------------------------
+def test_during_a_sale_the_queue_is_explored_and_the_sticker_claimed_once_a_day(world, monkeypatch):
+    f = world["make"]()
+    done = []
+    monkeypatch.setattr(steam, "sale_status", lambda s: {"sale": True, "can_claim": not done.count("sticker"), "next_claim": 0, "queue_task": 0})
+    monkeypatch.setattr(steam, "explore_queue", lambda s: done.append("queue") or 12)
+    monkeypatch.setattr(steam, "claim_sticker", lambda s: done.append("sticker") or "Cozy Cat")
+    f._sale_chore()
+    assert done == ["queue"] * extras.QUEUES_A_DAY + ["sticker"] and f.state["sale"]["on"]
+    f._next_sale = 0
+    f._sale_chore()                                    # the same day: nothing more
+    assert len(done) == extras.QUEUES_A_DAY + 1
+    f.state["sale"]["day"] = "2000-01-01"              # the next day
+    f._next_sale = 0
+    done.remove("sticker")
+    f._sale_chore()
+    assert done.count("queue") == 2 * extras.QUEUES_A_DAY and done.count("sticker") == 1
+    assert any("Claimed the sale's free sticker (Cozy Cat)" in h["text"] for h in f.state["history"])
+
+
+def test_between_sales_nothing_is_explored_and_the_rule_can_be_off(world, monkeypatch):
+    f, asked = world["make"](), []
+    monkeypatch.setattr(steam, "sale_status", lambda s: asked.append(1) or {"sale": False, "can_claim": False, "next_claim": 0, "queue_task": None})
+    monkeypatch.setattr(steam, "explore_queue", lambda s: pytest.fail("no sale, no queue"))
+    f._sale_chore()
+    f._sale_chore()                                    # asked again only hours later
+    assert asked == [1] and not f.state["sale"]["on"]
+    f.update_settings({"sale_rewards": False})
+    f._next_sale = 0
+    f._sale_chore()
+    assert asked == [1]
+
+
+def test_steam_days_turn_over_at_10_in_seattle():
+    winter = lambda h: calendar_utc(2026, 12, 20, h)
+    assert extras.steam_day(winter(17)) == "2026-12-19" and extras.steam_day(winter(18)) == "2026-12-20"
+
+
+def calendar_utc(*parts):
+    import calendar
+    return calendar.timegm((*parts, 0, 0, 0, 0, 0))
+
+
+def test_the_store_gets_a_token_of_its_own(tmp_path, monkeypatch):
+    from cardfarm import auth
+    s = auth.Session(str(tmp_path / "session.json"))
+    s.steamid, s.refresh_token = "7656", "refresh"
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 86400}).encode()).decode().rstrip("=")
+    store_jwt = f"h.{payload}.s"
+    monkeypatch.setattr(auth, "post_json", lambda url, data, **kw: {"steamID": "7656", "transfer_info": [
+        {"url": "https://store.steampowered.com/login/settoken", "params": {"nonce": "a"}},
+        {"url": "https://steamcommunity.com/login/settoken", "params": {"nonce": "c"}}]})
+    hops = []
+    monkeypatch.setattr(auth, "post_for_cookies", lambda url, data: hops.append(url) or (200, "", {"steamLoginSecure": f"7656%7C%7C{store_jwt}"}))
+    assert s.store_cookies()["steamLoginSecure"] == f"7656%7C%7C{store_jwt}"
+    s.store_token()                                    # still fresh: no second sign-in hop
+    assert hops == ["https://store.steampowered.com/login/settoken"]
+    assert json.load(open(tmp_path / "session.json"))["store_access"] == store_jwt
+
+
+# --- worth, all-time earnings, alerts ------------------------------------------------------------------
+def test_your_cards_are_worth_what_their_known_prices_fetch(world):
+    f = world["make"]()
+    f._hold([card(assetid="1", hash="10-A"), card(assetid="2", hash="10-A"), card(assetid="3", hash="11-B", appid=11)])
+    f.prices.cache["cards:10"] = {"at": time.time() - 10 * 86400, "v": {"10-A": 18}}   # old prices still count
+    assert f.worth()["cards"] == {"cents": 2 * rules.received(18), "priced": 2, "of": 3}
+    priced = []
+    f.prices.game_cards = lambda appid: priced.append(appid)
+    f._worth_chore()                                   # the stale or unknown game with the most cards first
+    f._worth_chore()                                   # ...one every few minutes
+    assert priced == [10]
+    f.prices.cache["cards:10"]["at"] = time.time()
+    f._next_worth = 0
+    f._worth_chore()
+    assert priced == [10, 11]
+
+
+def test_all_time_earnings_and_the_export(world, monkeypatch, tmp_path):
+    f = world["make"]()
+    day = 86400
+    f.state["sales"] = [{"at": time.time() - k * 40 * day, "listingid": str(k), "name": f"Card {k}", "hash": "",
+                         "game": "Ember Trading Card" if k % 2 == 0 else "Counter-Strike 2", "appid": 10, "received": 10 + k}
+                        for k in range(4)]
+    f.state["idled"] = {"10": 7200}
+    life = f.lifetime()
+    assert len(life["months"]) == 4 and life["card_cents"] == 10 + 12 and life["per_hour"] == 11
+    monkeypatch.setattr(market_mod, "_show_file", lambda path: None)
+    monkeypatch.setattr(market_mod.os.path, "expanduser", lambda p: str(tmp_path / "Downloads"))
+    out = f.export_sales()["path"]
+    assert out.startswith(f.data)                      # no Downloads folder: the data folder
+    lines = open(out).read().splitlines()
+    assert lines[0].startswith("Sold at,") and len(lines) == 5 and lines[1].endswith(",0.13") and lines[-1].endswith(",0.10")  # oldest first
+
+
+def test_older_sales_are_read_once_and_merged(world, monkeypatch):
+    f = world["make"]()
+    sale = lambda k, at: {"at": at, "listingid": str(k), "name": "x", "hash": "", "game": "g", "appid": 1, "received": k}
+    calls = []
+
+    def since(session, since, most=500):
+        calls.append(since)
+        return [sale(3, 300), sale(2, 200)] if since else [sale(3, 300), sale(2, 200), sale(1, 100)]
+    monkeypatch.setattr(steam, "sales_since", since)
+    f._sync_sales()
+    assert [s["at"] for s in f.state["sales"]] == [300, 200, 100] and f.state["sales_all"]
+    f._sync_sales()
+    assert calls == [0, 0, 300]
+
+
+def test_a_price_alert_fires_once_until_the_price_goes_back(world):
+    f = world["make"]()
+    f.notify = lambda title, body: told.append(body)
+    told, price = [], {"v": 15}
+    f.prices.item_stats = lambda appid, name, max_age=None: {"lowest": price["v"], "median": price["v"], "volume": 4}
+    f.add_alert({"appid": 753, "hash": "1001-Harbor", "name": "Harbor"}, "above", 20)
+    f._alerts_chore()
+    assert told == []
+    price["v"] = 25
+    for _ in range(2):
+        f._next_alerts = 0
+        f._alerts_chore()
+    assert len(told) == 1 and "Harbor sells for $0.25" in told[0]
+    price["v"] = 10; f._next_alerts = 0; f._alerts_chore()
+    price["v"] = 30; f._next_alerts = 0; f._alerts_chore()
+    assert len(told) == 2
+    f.add_alert({"appid": 753, "hash": "1001-Harbor", "name": "Harbor"}, "below", 12)
+    assert len(f.state["alerts"]) == 2
+    f.remove_alert("753/1001-Harbor/above")
+    assert [a["when"] for a in f.state["alerts"]] == ["below"]
+    with pytest.raises(ValueError):
+        f.add_alert({"appid": 753, "hash": "x"}, "sideways", 5)
+
+
+def test_the_page_gets_everything_new(world):
+    f = world["make"]()
+    snap = json.loads(api.answer(f, "GET", "/api/state", b"")[2])
+    assert {"sale", "worth", "alerts", "alert_search", "power"} <= set(snap) and "lifetime" in snap["sales"]
+
+
+def test_buy_orders_are_read_from_one_big_page(monkeypatch):
+    asked = []
+    monkeypatch.setattr(steam, "get_json", lambda url, **kw: asked.append(url) or {"success": True, "buy_orders": [
+        {"buy_orderid": str(k), "quantity_remaining": "1"} for k in range(14)]})
+    s = type("S", (), {"cookies": lambda self: {}})()
+    assert len(steam.buy_orders(s)) == 14 and "count=100" in asked[0]

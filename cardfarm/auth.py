@@ -16,6 +16,7 @@ from .http import post_for_cookies, post_json
 API = "https://api.steampowered.com/IAuthenticationService"
 LOGIN = "https://login.steampowered.com"
 COMMUNITY = "https://steamcommunity.com"
+STORE = "https://store.steampowered.com"
 
 
 def _claims(jwt):
@@ -29,12 +30,13 @@ class Session:
     def __init__(self, path):
         self.path = path
         self.steamid = self.account = self.refresh_token = self.access_token = None
+        self.store_access = None  # the store signs in with a token of its own (the Discovery Queue)
         self.sessionid = secrets.token_hex(12)
         self.qr = None  # pending sign-in: {client_id, request_id, url, interval, expires}
         self._renewing = threading.Lock()  # the farm, market lookups and background jobs all ask for cookies
         saved = files.read_json(path)  # a damaged one: signed out, sign in again
         if isinstance(saved, dict):
-            for k in ("steamid", "account", "refresh_token", "access_token", "sessionid"):
+            for k in ("steamid", "account", "refresh_token", "access_token", "store_access", "sessionid"):
                 setattr(self, k, saved.get(k) or getattr(self, k))
 
     @property
@@ -43,10 +45,10 @@ class Session:
 
     def save(self):
         files.write_json(self.path, {k: getattr(self, k) for k in
-                                     ("steamid", "account", "refresh_token", "access_token", "sessionid")}, private=True)
+                                     ("steamid", "account", "refresh_token", "access_token", "store_access", "sessionid")}, private=True)
 
     def sign_out(self):
-        self.steamid = self.account = self.refresh_token = self.access_token = None
+        self.steamid = self.account = self.refresh_token = self.access_token = self.store_access = None
         self.qr = None
         if os.path.exists(self.path):
             os.remove(self.path)
@@ -97,11 +99,12 @@ class Session:
         self.refresh_token = r.get("refresh_token") or self.refresh_token
         self.save()
 
-    def _renew_like_a_browser(self):
+    def _renew_like_a_browser(self, site=COMMUNITY):
+        """The sign-in cookie's token for one Steam site (each has its own)."""
         r = post_json(f"{LOGIN}/jwt/finalizelogin",
                       {"nonce": self.refresh_token, "sessionid": self.sessionid, "redir": f"{COMMUNITY}/login/home/?goto="},
                       headers={"Origin": COMMUNITY, "Referer": f"{COMMUNITY}/"})
-        hop = next((t for t in r.get("transfer_info", []) if t.get("url", "").startswith(f"{COMMUNITY}/")), None)
+        hop = next((t for t in r.get("transfer_info", []) if t.get("url", "").startswith(f"{site}/")), None)
         if not hop:
             return None
         _, _, set_cookies = post_for_cookies(hop["url"], dict(hop["params"], steamID=r.get("steamID", self.steamid)))
@@ -109,8 +112,26 @@ class Session:
         steamid, _, token = value.partition("||")
         return token if token and steamid == self.steamid else None
 
-    def _stale(self):
-        return not self.access_token or _claims(self.access_token).get("exp", 0) < time.time() + 3600
+    def _stale(self, token=None):
+        token = self.access_token if token is None else token
+        return not token or _claims(token).get("exp", 0) < time.time() + 3600
+
+    def store_token(self):
+        """A token the Steam store takes (its sign-in cookie and the sale's sticker), renewed like
+        the community's when it's due."""
+        if self._stale(self.store_access or ""):
+            with self._renewing:
+                if self._stale(self.store_access or ""):
+                    token = self._renew_like_a_browser(STORE)
+                    if not token:
+                        raise RuntimeError(f"Steam {NO_RENEWAL} for the store; sign in again")
+                    self.store_access = token
+                    self.save()
+        return self.store_access
+
+    def store_cookies(self):
+        return {"steamLoginSecure": f"{self.steamid}%7C%7C{self.store_token()}", "sessionid": self.sessionid,
+                "Steam_Language": "english"}
 
     def cookies(self):
         if self._stale():

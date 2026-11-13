@@ -208,6 +208,12 @@ td.acts a:hover { color: var(--ink); text-decoration: underline; }
 /* Quick badge: a search box, the badge's level as five pips, each card's listings by price */
 input.find { font: 500 13.5px/1 var(--font-ui); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule-strong);
   border-radius: var(--radius); padding: 8px 10px; width: 240px; max-width: 100%; }
+.hours { display: inline-flex; align-items: center; gap: 6px; }
+.hours input { width: 52px; }
+.split.inner { gap: 20px; align-items: start; }
+.split.inner > table { margin-top: 8px; }
+.alertform { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0 4px; }
+.alertform .what { font-weight: 600; flex: 1 1 100%; }
 .findbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 12px 0 4px; }
 .findbar .pick { margin-left: auto; }
 .ladder.under { display: none; }
@@ -317,6 +323,7 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
         <div><b id="s-listed">–</b><span>Listed · you get</span></div>
         <div><b id="s-gems">–</b><span>Gems made</span></div>
       </div>
+      <p class="note" id="worth-cards" hidden></p>
       <div class="now" id="now"></div>
     </section>
 
@@ -364,6 +371,10 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
             <span class="pick" data-key="foils"><button data-v="sell">Sell</button><button data-v="keep">Keep</button></span></div>
           <div class="line"><span>Gems instead below<small>what a buyer pays</small></span>
             <input class="money" inputmode="decimal" title="An amount, like 50¢ or $5" data-key="min_sell_cents"></div>
+          <div class="line"><span>Pause on battery<small>a laptop away from its charger doesn't idle games</small></span>
+            <button class="toggle" data-key="pause_on_battery"></button></div>
+          <div class="line"><span>Farm only between<small>hours of the day, 0 to 23; the same two for all day</small></span>
+            <span class="hours"><input type="number" min="0" max="23" data-key="hours_from" aria-label="From hour"><span class="faint">and</span><input type="number" min="0" max="23" data-key="hours_to" aria-label="Until hour"></span></div>
         </div>
         <div>
           <div class="line"><span>Pause while I play</span><button class="toggle" data-key="pause_when_playing"></button></div>
@@ -374,6 +385,8 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
           <div class="line"><span>Skip free-to-play games<small>like CS2: they drop cards while you play, not idled</small></span>
             <button class="toggle" data-key="skip_free_to_play"></button></div>
           <div class="line"><span>Tell me about listings to confirm</span><button class="toggle" data-key="notify"></button></div>
+          <div class="line"><span>Steam sale rewards<small id="sale-note">during Steam sales: explore your Discovery Queue and claim the free daily sticker</small></span>
+            <button class="toggle" data-key="sale_rewards"></button></div>
         </div>
         <div class="line wide"><span>Keep every card from<small>for sets you're crafting; mark games below</small></span>
           <span class="chips" id="kept-games"></span></div>
@@ -384,13 +397,13 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
     <div id="tab-panel-items" hidden>
     <section>
       <div class="figures">
-        <div><b id="i-inv">–</b><span>Inventories on</span></div>
+        <div><b id="i-worth">–</b><span id="i-worth-label">Worth</span></div>
         <div><b id="i-review">–</b><span>To review</span></div>
         <div><b id="i-listed">–</b><span>Listed</span></div>
         <div><b id="i-cents">–</b><span>You get</span></div>
       </div>
       <p class="note">Skins, cases, backgrounds and anything else marketable, from the inventories you switch on.
-        Nothing is listed unless you say so.</p>
+        Nothing is listed or turned into gems unless you say so.</p>
     </section>
 
     <section class="settings">
@@ -409,6 +422,8 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
             <input class="money" inputmode="decimal" title="An amount, like 50¢ or $5" data-key="items_min_cents"></div>
           <div class="line"><span>Only items that sold at least<small>times in the last 24 hours; 0 any. Prices go by what sold, not only by asks</small></span>
             <input type="number" min="0" data-key="items_min_sales"></div>
+          <div class="line"><span>Backgrounds &amp; emoticons as gems<small>when their gems are worth more than a sale; Auto only for new ones</small></span>
+            <span class="pick" data-key="items_gems"><button data-v="auto">Auto</button><button data-v="review">Review</button><button data-v="off">Off</button></span></div>
         </div>
         <div class="line wide"><span>Never list<small>"Always keep" adds to this</small></span>
           <span class="chips" id="kept-items"></span></div>
@@ -418,11 +433,11 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
     <section>
         <div class="head">
           <h2>Review <span id="items-count" class="faint"></span></h2>
-          <div class="tools"><button id="items-all-sell">Sell all</button></div>
+          <div class="tools"><button id="items-suggested" class="go">Apply suggestions</button><button id="items-all-sell">Sell all</button></div>
         </div>
         <div class="scroll">
           <table>
-            <thead id="items-head"><tr><th class="pic"></th><th>Item</th><th class="r">Asks</th><th class="r hide-sm">You get</th><th class="r hide-sm" title="Sold in the last 24 hours, and their median price">Sold, 24 h</th><th></th></tr></thead>
+            <thead id="items-head"><tr><th class="pic"></th><th>Item</th><th class="r">Asks</th><th class="r hide-sm">You get</th><th class="r hide-sm" title="Sold in the last 24 hours, and their median price">Sold, 24 h</th><th class="r hide-sm" title="Gems it turns into, and what they'd sell for as sacks">Gems</th><th></th></tr></thead>
             <tbody id="items"></tbody>
           </table>
         </div>
@@ -484,6 +499,39 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
         <table><thead><tr><th>Game</th><th class="r">Sold</th><th class="r">You got</th></tr></thead><tbody id="sales-games"></tbody></table>
       </section>
     </div>
+
+    <section>
+      <div class="head"><h2>All time</h2><div class="tools"><button id="sales-export">Export CSV</button></div></div>
+      <p class="note" id="life-note"></p>
+      <div class="split inner">
+        <table><thead><tr><th>Month</th><th class="r">Sold</th><th class="r">You got</th></tr></thead><tbody id="life-months"></tbody></table>
+        <table><thead><tr><th>Game</th><th class="r">Sold</th><th class="r">You got</th></tr></thead><tbody id="life-games"></tbody></table>
+      </div>
+    </section>
+
+    <section id="alerts-section">
+      <div class="head"><h2>Price alerts <span id="alerts-count" class="faint"></span></h2></div>
+      <p class="note">A notice when something sells for at least a price, or is listed for at most one. Prices are checked every hour.</p>
+      <form class="findbar" id="alert-find">
+        <input class="find" id="alert-text" type="search" placeholder="Any market item" aria-label="Item name" autocomplete="off">
+        <button id="alert-search" type="submit">Search the market</button>
+      </form>
+      <div class="scroll" id="alert-results-box" hidden>
+        <table><tbody id="alert-results"></tbody></table>
+      </div>
+      <div class="alertform" id="alert-form" hidden>
+        <span class="what" id="alert-what"></span>
+        <span class="pick" id="alert-when"><button type="button" data-when="above">Sells for at least</button><button type="button" data-when="below">Listed for at most</button></span>
+        <input class="money" id="alert-cents" inputmode="decimal" aria-label="Price" title="An amount, like 50¢ or $5">
+        <button id="alert-add" class="go">Add alert</button>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead id="alerts-head"><tr><th class="pic"></th><th>Item</th><th>When</th><th class="r">Now</th><th class="r hide-sm">Checked</th><th></th></tr></thead>
+          <tbody id="alerts"></tbody>
+        </table>
+      </div>
+    </section>
     </div>
 
     <div id="tab-panel-gems" hidden>
@@ -798,11 +846,15 @@ function renderItems(s) {
   const it = s.items, list = it.review, on = it.inventories.filter(i => i.on);
   $("#tab-items").textContent = list.length || "";
   $("#items-count").textContent = list.length ? `(${list.length})` : "";
-  $("#i-inv").textContent = on.length;
+  const w = s.worth.items;
+  $("#i-worth").textContent = w.at ? money(w.cents) : "–";
+  $("#i-worth-label").textContent = w.at ? `Worth, checked ${ago(w.at)}${ago(w.at) === "just now" ? "" : " ago"}` : "Worth (after Check items)";
+  $("#i-worth-label").title = w.at && w.priced < w.of ? `${w.priced} of ${w.of} items have a market price` : "";
   $("#i-review").textContent = list.length;
   $("#i-listed").textContent = s.stats.items_listed;
   $("#i-cents").textContent = money(s.stats.items_cents);
-  $("#items-all-sell").disabled = !list.length;
+  $("#items-all-sell").disabled = !list.some(e => e.item.marketable !== false);
+  $("#items-suggested").disabled = !list.length;
   const checking = s.busy.includes("items");
   $("#check-items").disabled = checking;
   $("#check-items").textContent = checking ? "Checking…" : "Check items";
@@ -812,16 +864,17 @@ function renderItems(s) {
   fill($("#kept-items"), s.settings.items_keep.length ? s.settings.items_keep.map(n => `<button class="chip" data-unkeep-item="${esc(n)}" title="Allow listing again">${esc(n)}<span class="x">×</span></button>`).join("")
     : '<span class="none">none</span>');
   $("#items-head").hidden = !list.length;
-  fill($("#items"), !list.length ? `<tr><td colspan="6" class="empty">${on.length ? "Nothing waiting. Check items to look again." : "Switch on an inventory above, then Check items."}</td></tr>`
+  fill($("#items"), !list.length ? `<tr><td colspan="7" class="empty">${on.length ? "Nothing waiting. Check items to look again." : "Switch on an inventory above, then Check items."}</td></tr>`
     : list.map(e => {
     const i = e.item, d = e.detail;
     return `<tr>
       <td class="pic" style="width:60px">${art(i.icon, true)}</td>
-      <td class="cardname"><b>${esc(i.name)}</b>${i.amount > 1 ? `<span class="tag">×${i.amount}</span>` : ""}<span class="faint">${esc([i.kind, i.game].filter(Boolean).join(" · "))}</span></td>
-      <td class="r num">${money(d.buyer)}${i.amount > 1 ? '<span class="faint small"> each</span>' : ""}</td>
-      <td class="r num hide-sm">${money(d.receive)}</td>
+      <td class="cardname"><b>${esc(i.name)}</b>${i.amount > 1 ? `<span class="tag">×${i.amount}</span>` : ""}${e.action === "gems" ? '<span class="tag">gems</span>' : ""}<span class="faint">${esc([i.kind, i.game].filter(Boolean).join(" · "))}</span></td>
+      <td class="r num">${d.buyer ? money(d.buyer) : '<span class="faint">none</span>'}${d.buyer && i.amount > 1 ? '<span class="faint small"> each</span>' : ""}</td>
+      <td class="r num hide-sm">${d.buyer ? money(d.receive) : "–"}</td>
       <td class="r num hide-sm nowrap">${d.volume == null ? "–" : d.volume.toLocaleString() + (d.median ? " · " + money(d.median) : "")}</td>
-      <td class="acts"><button data-item="${esc(e.id)}" data-a="sell">Sell</button><button data-item="${esc(e.id)}" data-a="keep">Keep</button><button class="link" data-item="${esc(e.id)}" data-a="always" title="Keep this and never offer one like it again">Always keep</button></td>
+      <td class="r num hide-sm nowrap">${d.gems ? `${d.gems} · ${money(Math.round(d.gem_value))}` : "–"}</td>
+      <td class="acts"><button data-item="${esc(e.id)}" data-a="sell" ${i.marketable === false || !d.buyer ? "disabled" : ""}>Sell</button>${i.goo ? `<button data-item="${esc(e.id)}" data-a="gems" ${d.gems ? "" : "disabled"}>Gems</button>` : ""}<button data-item="${esc(e.id)}" data-a="keep">Keep</button><button class="link" data-item="${esc(e.id)}" data-a="always" title="Keep this and never offer one like it again">Always keep</button>${i.marketable === false ? "" : `<button class="link" data-alert-item="${esc(e.id)}" title="Get a notice when its price moves">Alert</button>`}</td>
     </tr>`;
   }).join(""));
 }
@@ -849,7 +902,7 @@ function renderMarket(s) {
     : '<tr><td colspan="3" class="empty">No sales yet.</td></tr>');
   fill($("#sales-games"), s.sales.games.length ? s.sales.games.map(([g, [n, c]]) => `<tr><td>${esc(g)}</td><td class="r num">${n}</td><td class="r num">${money(c)}</td></tr>`).join("")
     : '<tr><td colspan="3" class="empty">No sales in the last 30 days.</td></tr>');
-  $("#sales-note").textContent = s.sales.tracked_since ? `${t.all[0]} sales (${money(t.all[1])}) since ${new Date(s.sales.tracked_since * 1000).toLocaleDateString()}; the last 7 days: ${money(t.week[1])}.` : "";
+  $("#sales-note").textContent = s.sales.tracked_since ? `The last 7 days: ${money(t.week[1])}.` : "";
 }
 
 // the packs worth making that your gems cover together, most gain first
@@ -1068,6 +1121,47 @@ function renderOrders(s) {
     : '<tr><td colspan="5" class="empty">No orders open: every card has come in.</td></tr>');
 }
 
+function renderLife(s) {
+  const L = s.sales.lifetime, t = s.sales.totals;
+  const best = L.best_month ? ` Best month: ${L.best_month[0]} (${money(L.best_month[1][1])}).` : "";
+  $("#life-note").textContent = (t.all[0] ? `${t.all[0].toLocaleString()} sales for ${money(t.all[1])} since ${new Date(s.sales.tracked_since * 1000).toLocaleDateString()}.`
+    : "No sales yet.") + best
+    + (L.per_hour != null ? ` Card sales: ${money(L.card_cents)}, about ${money(L.per_hour)} per hour of idling (${L.idled_hours.toLocaleString()} h idled).` : "")
+    + (L.complete ? "" : " Your older sales are read in the background.");
+  $("#sales-export").disabled = !t.all[0];
+  const rows = list => list.length ? list.map(([k, [n, c]]) => `<tr><td>${esc(k)}</td><td class="r num">${n}</td><td class="r num">${money(c)}</td></tr>`).join("")
+    : '<tr><td colspan="3" class="empty">No sales yet.</td></tr>';
+  fill($("#life-months"), rows(L.months));
+  fill($("#life-games"), rows(L.games));
+}
+
+let alertPick = null, alertWhen = "above", alertsAdded = 0;
+function renderAlerts(s) {
+  const A = s.alerts, found = s.alert_search;
+  $("#alerts-count").textContent = A.length ? `(${A.length})` : "";
+  $("#alert-search").disabled = s.busy.includes("alert-search");
+  $("#alert-search").textContent = s.busy.includes("alert-search") ? "Searching…" : "Search the market";
+  $("#alert-results-box").hidden = !found.text || !!alertPick || found.at < alertsAdded;
+  fill($("#alert-results"), found.results.length ? found.results.map((r, i) => `<tr><td class="pic" style="width:60px">${art(r.icon, true)}</td>
+      <td class="cardname"><b>${esc(r.name)}</b><span class="faint">${esc(r.game)}</span></td><td class="r num">${r.price ? money(r.price) : "–"}</td>
+      <td class="acts"><button data-alert-pick="${i}">Pick</button></td></tr>`).join("")
+    : `<tr><td class="empty">Nothing on the market matches “${esc(found.text)}”.</td></tr>`);
+  $("#alert-form").hidden = !alertPick;
+  if (alertPick) {
+    $("#alert-what").textContent = `${alertPick.name}${alertPick.game ? " · " + alertPick.game : ""}${alertPick.price ? ` (now ${money(alertPick.price)})` : ""}`;
+    document.querySelectorAll("#alert-when button").forEach(b => b.classList.toggle("on", b.dataset.when === alertWhen));
+  }
+  $("#alerts-head").hidden = !A.length;
+  fill($("#alerts"), A.length ? A.map(a => `<tr class="${a.armed ? "" : "picked"}">
+      <td class="pic" style="width:60px">${art(a.icon, true)}</td>
+      <td class="cardname"><b>${esc(a.name)}</b>${a.armed ? "" : '<span class="tag" title="It fired; it fires again once the price has gone back">fired</span>'}<span class="faint">${esc(a.game)}</span></td>
+      <td class="nowrap">${a.when === "above" ? "sells for ≥ " : "listed for ≤ "}${money(a.cents)}</td>
+      <td class="r num">${a.when === "above" ? money(a.price) : money(a.lowest)}</td>
+      <td class="r num hide-sm nowrap">${a.checked ? ago(a.checked) + (ago(a.checked) === "just now" ? "" : " ago") : "soon"}</td>
+      <td class="acts"><button class="link" data-alert-remove="${esc(a.id)}">Remove</button></td></tr>`).join("")
+    : '<tr><td colspan="6" class="empty">No alerts. Search for an item above, or press Alert on one in the Items tab.</td></tr>');
+}
+
 function renderTape(history) {
   const html = history.map(h => `<div class="${h.kind}"><span class="mark">${MARK[h.kind] || "·"}</span><time>${new Date(h.at * 1000)
     .toLocaleString([], {month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false})}</time><span class="t">${esc(h.text)}</span></div>`).join("");
@@ -1125,6 +1219,15 @@ function render(s) {
   $("#s-drops").textContent = s.stats.drops;
   $("#s-listed").textContent = `${s.stats.listed} · ${money(s.stats.listed_cents)}`;
   $("#s-gems").textContent = s.stats.gems;
+  const wc = s.worth.cards;
+  $("#worth-cards").hidden = !wc.of;
+  $("#worth-cards").textContent = wc.of ? `Your ${wc.of.toLocaleString()} cards would sell for about ${money(wc.cents)}`
+    + (wc.priced < wc.of ? ` (${wc.priced.toLocaleString()} priced so far; the rest are looked up a game at a time)` : "") : "";
+  const sale = s.sale;
+  $("#sale-note").textContent = !s.settings.sale_rewards ? "during Steam sales: explore your Discovery Queue and claim the free daily sticker"
+    : sale.on ? `a sale is on: ${sale.queues} of 3 queues explored today${sale.sticker ? ", sticker claimed" : ""}`
+    : sale.checked ? `no Steam sale right now (checked ${ago(sale.checked)}${ago(sale.checked) === "just now" ? "" : " ago"}); it starts by itself when one does`
+    : "during Steam sales: explore your Discovery Queue and claim the free daily sticker";
   const sorting = s.busy.includes("cards");
   $("#review-existing").disabled = sorting;
   $("#review-existing").textContent = sorting ? "Sorting…" : "Sort cards I have";
@@ -1141,6 +1244,8 @@ function render(s) {
   renderBadges(s);
   renderHeld(s);
   renderOrders(s);
+  renderLife(s);
+  renderAlerts(s);
 }
 
 async function load() {
@@ -1161,6 +1266,15 @@ document.addEventListener("click", e => {
   if (d.list) { badgeList = d.list; return renderBadges(state); }
   if (d.target) { badgeTarget = +d.target; return renderBadges(state); }
   if (d.badge) { badgeTarget = null; return post("/api/badges/price", {appid: +d.badge, game: d.game}); }
+  if (d.when) { alertWhen = d.when; return renderAlerts(state); }
+  if (d.alertPick) { const r = state.alert_search.results[+d.alertPick]; alertPick = r;
+    $("#alert-cents").value = r.price ? moneyBox(r.price) : ""; return renderAlerts(state); }
+  if (d.alertItem) { const e = state.items.review.find(x => x.id === d.alertItem); if (!e) return;
+    alertPick = {appid: e.item.appid, hash: e.item.hash, name: e.item.name, game: e.item.game, icon: e.item.icon, price: e.detail.buyer};
+    $("#alert-cents").value = e.detail.buyer ? moneyBox(e.detail.buyer) : "";
+    tab = "market"; try { localStorage.setItem("tab", tab); } catch {}
+    renderTabs(); renderAlerts(state); return $("#alerts-section").scrollIntoView({behavior: "smooth"}); }
+  if (d.alertRemove) return post("/api/alerts/remove", {id: d.alertRemove});
   if (t.classList.contains("toggle")) return setting(d.key, !t.classList.contains("on"));
   const pick = t.closest(".pick");
   if (pick) {
@@ -1258,6 +1372,18 @@ $("#levelup-go").onclick = () => { const p = state.levelup.plan;
     && post("/api/levelup/go"); };
 $("#items-all-sell").onclick = () => confirm(`List all ${state.items.review.length} items on the market at the prices shown?`)
   && post("/api/items/review", {ids: "all", action: "sell"});
+$("#items-suggested").onclick = () => { const n = state.items.review.filter(e => e.action === "gems").length;
+  return confirm(`Do the suggestion for all ${state.items.review.length} items?` + (n ? ` ${n} turn into gems, which can't be undone.` : ""))
+    && post("/api/items/review", {ids: "all", action: "suggested"}); };
+$("#sales-export").onclick = async () => { const r = await post("/api/sales/export"); if (r.path) alert(`Saved to ${r.path}`); };
+$("#alert-find").onsubmit = e => { e.preventDefault(); const text = $("#alert-text").value.trim();
+  if (text.length < 2) return;
+  alertPick = null; post("/api/alerts/search", {text}); };
+$("#alert-add").onclick = () => { const cents = readMoney($("#alert-cents").value, false);
+  if (!alertPick || !Number.isFinite(cents) || cents < 1) return alert("Type a price for the alert, like 20¢ or $1.50");
+  const item = {appid: alertPick.appid, hash: alertPick.hash, name: alertPick.name, game: alertPick.game, icon: alertPick.icon};
+  alertPick = null; $("#alert-text").value = ""; alertsAdded = Date.now() / 1000;
+  post("/api/alerts/add", {item, when: alertWhen, cents}); };
 load();
 setInterval(load, 3000);
 </script>

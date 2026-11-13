@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 
-from . import files, http, market, qr, quick, rules, steam, update
+from . import extras, files, http, market, power, qr, quick, rules, steam, update
 from .auth import NO_RENEWAL, Session
 from .idler import Idler, game_you_are_playing, steam_pid
 
@@ -47,10 +47,12 @@ def fresh_state():
             "bulk": {},            # appid -> {"base": minutes when bulk idling began, "secs": bulk idled since}
             "items": {"inventories": [], "review": [], "seen": {}, "checked": 0},
             **market.market_state(),
+            **extras.extras_state(),
             "quick": quick.quick_state()}
 
 
-class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.QuickBadge):
+class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.QuickBadge, extras.SaleRewards,
+           extras.Worth, extras.Alerts):
     def __init__(self, data_dir):
         self.data = data_dir
         os.makedirs(data_dir, exist_ok=True)
@@ -84,6 +86,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         self._next_badges = self._next_inventory = 0
         self._next_items = time.time() + ITEMS_EVERY
         self._soon = False
+        self._on_battery = False
         self._chores_running = threading.Lock()
         self._checking_items = threading.Lock()
         self._refused = []  # when Steam wouldn't renew the sign-in
@@ -252,6 +255,11 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         pid = steam_pid()
         if not pid:
             return self._idle_none("Waiting for Steam to start")
+        if not power.in_hours(s["hours_from"], s["hours_to"]):
+            return self._idle_none(f"Waiting for your farming hours ({s['hours_from']}:00 to {s['hours_to']}:00)")
+        self._on_battery = power.on_battery()
+        if s["pause_on_battery"] and self._on_battery:
+            return self._idle_none("Paused on battery power (plug in the charger to go on)")
         if self._steam and pid != self._steam and self.idler.running():
             self.log("Steam restarted; starting the games again")
             self._idle_none("Steam restarted")
@@ -301,6 +309,11 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             if s["cancel_after_days"] and time.time() >= self._next_listings:
                 self._next_listings = time.time() + market.LISTINGS_EVERY
                 self.check_listings()
+            for chore in (self._sale_chore, self._alerts_chore, self._worth_chore):
+                try:
+                    chore()
+                except Exception as e:
+                    self.note(f"{chore.__name__.strip('_').replace('_', ' ').capitalize()} failed: {e}")
         finally:
             self._chores_running.release()
 
@@ -521,6 +534,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         self._soon = False
         cards = steam.cards_in_inventory(self.session)
         ids = {c["assetid"] for c in cards}
+        self._hold(cards)
         with self.lock:
             seen = set(self.state["seen"])
             first_look = not self.state["baseline"]
@@ -683,6 +697,8 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                     self.state["kept"].append(e["id"])
                 elif e.get("kind") == "card" and self.finishing(e["card"]["appid"]):
                     box["review"].append(e)  # stays: its set is being finished
+                elif e.get("kind") == "item" and act == "gems" and not e["item"].get("goo"):
+                    box["review"].append(e)  # only backgrounds and emoticons turn into gems
                 elif act in ("sell", "gems"):
                     self._enqueue(act, e)
         if action == "always":
@@ -718,6 +734,8 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
         pending = self._drop_pending_from_review()
         skip = self._queued_ids() | pending
         offered = held = 0
+        sack = None  # a sack of gems' price, looked up once when an item can become gems
+        worth = {"cents": 0, "priced": 0, "of": 0, "at": time.time()}
         for inv in chosen:
             stock = steam.items_in_inventory(self.session, inv["appid"], inv["context"], inv["name"])
             ids = {i["assetid"] for i in stock}
@@ -734,22 +752,33 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                 if item["assetid"] in skip or not (manual or new):
                     continue
                 try:
-                    stats = self.prices.item_stats(item["appid"], item["hash"])
-                    action, detail = rules.decide_item(item, stats, self.settings)
+                    gems = 0
+                    if item.get("goo") and self.settings["items_gems"] != "off":
+                        gems = self.prices.gems(item["goo"][0], item["goo"][1], bool(item["goo"][2]))
+                        sack = sack or self.prices.gem_sack()
+                    no_market = {"lowest": None, "median": None, "volume": 0}
+                    stats = self.prices.item_stats(item["appid"], item["hash"]) if item.get("marketable", True) else no_market
+                    action, detail = rules.decide_item(item, stats, self.settings, gems, sack)
                 except Exception as e:
                     self.log(f"Couldn't price {item['name']}: {e}", "warn")
                     continue
+                going = rules.realistic(stats)
+                worth["of"] += item["amount"]
+                if going:
+                    worth["cents"] += rules.received(going) * item["amount"]
+                    worth["priced"] += item["amount"]
                 if action == "keep":
                     held += 1
                     continue
-                entry = {"id": item["assetid"], "kind": "item", "item": item, "action": "sell",
+                entry = {"id": item["assetid"], "kind": "item", "item": item, "action": action,
                          "detail": detail, "at": time.time()}
                 # one listing far under what it usually sells for is somebody's mistake or bait,
                 # not the price: that one is yours to judge
                 odd = stats.get("lowest") and stats.get("median") and stats["lowest"] < stats["median"] * ITEM_SPREAD
-                if new and not manual and self.settings["items_new"] == "auto" and not odd:
+                auto = self.settings["items_gems"] == "auto" if action == "gems" else self.settings["items_new"] == "auto" and not odd
+                if new and not manual and auto:
                     self.log(f"New item: {item['name']} ({inv['name']})")
-                    self._enqueue("sell", entry)
+                    self._enqueue(action, entry)
                 else:
                     with self.lock:
                         if not any(e["id"] == entry["id"] for e in box["review"]):
@@ -757,6 +786,8 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                     offered += 1
         with self.lock:
             self.state["items"]["checked"] = time.time()
+            if manual:  # every item was priced: what they'd all sell for
+                self.state["items"]["worth"] = worth
         if manual or offered:
             self.log(f"Items checked: {offered} to review"
                      + (f", {held} left alone (nobody selling, not selling lately, under your minimum or kept)" if held else ""))
@@ -821,6 +852,14 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             return self._do_orders(e)
         if e["kind"] == "quick":
             return self._do_quick(e)
+        if e["kind"] == "item" and action == "gems":
+            it = e["item"]
+            appid, item_type, border = it["goo"]
+            gems = steam.grind(self.session, appid, it["assetid"], self.prices.gems(appid, item_type, bool(border)) or e["detail"]["gems"])
+            with self.lock:
+                self.state["stats"]["gems"] += gems
+            self.log(f"Turned {it['name']} into {gems} gems", "gems")
+            return 0
         if e["kind"] == "item":
             it = e["item"]
             buyer = rules.asking_price(rules.realistic(self.prices.item_stats(it["appid"], it["hash"])), self.settings)
@@ -904,7 +943,9 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                           "review": st["items"]["review"], "checked": st["items"]["checked"]},
                 "ui": _page_version(), "version": update.VERSION,
                 "update": self.update and dict(self.update, installable=bool(self.update.get("url"))),
-                "listings": st["listings"], "sales": self.sales_summary(), "gems": st["gems"],
+                "listings": st["listings"], "sales": dict(self.sales_summary(), lifetime=self.lifetime()), "gems": st["gems"],
+                "sale": st["sale"], "worth": self.worth(), "alerts": st["alerts"], "alert_search": st["alert_search"],
+                "power": {"battery": self._on_battery, "in_hours": power.in_hours(self.settings["hours_from"], self.settings["hours_to"])},
                 "boosters": dict(st["boosters"], options=[o for o in st["boosters"]["options"] if o.get("profit") is not None][:150]),
                 "sets": dict(st["sets"], finishing=[dict(v, appid=int(k)) for k, v in st["finishing"].items()]),
                 "held": st.get("held", {"packs": [], "checked": 0}),

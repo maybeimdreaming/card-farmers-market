@@ -99,6 +99,16 @@ def _is_card(desc):
     return tags(desc).get("item_class", {}).get("internal_name") == "item_class_2"
 
 
+def _goo(desc):
+    """(game appid, item type, border) for the gem lookup, which the inventory gives its owner for
+    each card, background and emoticon; None for anything that can't be turned into gems."""
+    for act in desc.get("owner_actions", []):
+        m = re.search(r"GetGooValue\(\s*'[^']*',\s*'[^']*',\s*(\d+),\s*(\d+),\s*(\d+)", act.get("link", ""))
+        if m:
+            return int(m[1]), int(m[2]), int(m[3])
+    return None
+
+
 def cards_in_inventory(session, stock=None):
     """Every trading card: [{assetid, appid, name, game, hash, foil, marketable, icon, goo}]
     (stock: the Steam inventory as _inventory gave it a moment ago, to save reading it again)."""
@@ -107,11 +117,7 @@ def cards_in_inventory(session, stock=None):
         if not _is_card(x):
             continue
         t = tags(x)
-        goo = None  # the inventory tells its owner the exact gem lookup for each item
-        for act in x.get("owner_actions", []):
-            m = re.search(r"GetGooValue\(\s*'[^']*',\s*'[^']*',\s*(\d+),\s*(\d+),\s*(\d+)", act.get("link", ""))
-            if m:
-                goo = (int(m[1]), int(m[2]), int(m[3]))
+        goo = _goo(x)
         out.append({"assetid": a["assetid"], "appid": int(x["market_fee_app"]), "name": x["name"],
                     "game": t.get("Game", {}).get("localized_tag_name", ""),
                     "hash": x["market_hash_name"], "marketable": bool(x.get("marketable")),
@@ -148,14 +154,18 @@ def items_in_inventory(session, appid, context, name=""):
 
 
 def sellable_items(stock, appid, context, name=""):
+    """Items that can be sold, or turned into gems (backgrounds and emoticons, sellable or not:
+    "goo" says how to look up their gems)."""
     out = []
     for a, x in stock:
-        if not x.get("marketable") or ((appid, context) == CARDS and _is_card(x)):
+        steams_own = (appid, context) == CARDS
+        goo = _goo(x) if steams_own else None
+        if not (x.get("marketable") or goo) or (steams_own and _is_card(x)):
             continue
         out.append({"assetid": a["assetid"], "appid": appid, "context": context, "amount": int(a.get("amount") or 1),
                     "name": x.get("market_name") or x["name"], "hash": x["market_hash_name"],
-                    "game": name, "icon": x.get("icon_url", ""),
-                    "kind": tags(x).get("Type", {}).get("localized_tag_name", "")})
+                    "game": name, "icon": x.get("icon_url", ""), "marketable": bool(x.get("marketable")), "goo": goo,
+                    "kind": (tags(x).get("Type") or tags(x).get("item_class") or {}).get("localized_tag_name", "")})
     return out
 
 
@@ -210,9 +220,10 @@ class Prices:
         finally:
             self._last = time.time()
 
-    def _fresh(self, key):
+    def _fresh(self, key, max_age=None):
         hit = self.cache.get(key)
-        return hit if hit and time.time() - hit["at"] < hit.get("ttl", self.TTL) else None
+        ttl = min(hit.get("ttl", self.TTL), max_age or self.TTL) if hit else 0
+        return hit if hit and time.time() - hit["at"] < ttl else None
 
     def _remember(self, key, value, ttl=None):
         self.cache[key] = {"at": time.time(), "v": value, **({"ttl": ttl} if ttl else {})}
@@ -253,14 +264,15 @@ class Prices:
         """Lowest asking price in cents for any market item, or None when nobody sells it."""
         return self.item_stats(appid, hash_name)["lowest"]
 
-    def item_stats(self, appid, hash_name, lowest=True):
+    def item_stats(self, appid, hash_name, lowest=True, max_age=None):
         """{"lowest": cheapest asking price, "median": median sale price over the last 24 h, "volume":
         sales in the last 24 h} in cents. The sales come from the signed-in price history, the asking
         price from a search for the exact name (Steam's one-item price lookup is the first thing it
-        turns away). lowest=False skips the search (its "lowest" is then None)."""
+        turns away). lowest=False skips the search (its "lowest" is then None). max_age: an answer
+        older than this many seconds is looked up again (price alerts want fresher ones)."""
         key = f"stats:{appid}:{hash_name}:{int(lowest)}"
         with self.lock:
-            if self._fresh(key):
+            if self._fresh(key, max_age):
                 return self.cache[key]["v"]
             q = urllib.parse.urlencode({"appid": appid, "currency": 1, "market_hash_name": hash_name})
             stats = recent_sales(self._ask(f"{COMMUNITY}/market/pricehistory/?{q}").get("prices") or [])
@@ -668,8 +680,10 @@ def buy_order_status(session, orderid, hash_name="", appid=753):
 
 
 def buy_orders(session):
-    """Your buy orders still waiting on the market: {orderid: quantity still wanted}."""
-    d = _patient(lambda: get_json(f"{COMMUNITY}/market/mylistings/render/?query=&start=0&count=10&norender=1",
+    """Your buy orders still waiting on the market: {orderid: quantity still wanted}. Asked with the
+    largest page Steam allows (100): with count=10, more than 10 orders might have been cut short,
+    and every order missing from the answer would look filled."""
+    d = _patient(lambda: get_json(f"{COMMUNITY}/market/mylistings/render/?query=&start=0&count=100&norender=1",
                                   cookies=session.cookies()))
     if not d.get("success"):  # an answer without the list isn't "no orders": they'd all look filled
         raise RuntimeError("Steam didn't show your buy orders")
@@ -772,3 +786,65 @@ def unpack_booster(session, appid, assetid):
     if not items:
         raise RuntimeError(r.get("message") or f"Steam didn't open the pack (its answer: {json.dumps(r)[:120]})")
     return [i.get("name", "?") + (" (foil)" if i.get("foil") else "") for i in items]
+
+
+# --- Steam sales: the Discovery Queue and the free sticker ------------------------------------------
+STORE = "https://store.steampowered.com"
+
+
+def sale_status(session):
+    """{"sale": whether a Steam sale with rewards is on, "can_claim": the free sticker can be claimed
+    now, "next_claim": when it can be next (0: unknown), "queue_task": the sale's Discovery Queue
+    count when Steam gives one}. Between sales Steam answers both questions with nothing."""
+    q = urllib.parse.urlencode({"access_token": session.store_token(), "input_json": json.dumps({"language": "english"})})
+    claim = get_json(f"https://api.steampowered.com/ISaleItemRewardsService/CanClaimItem/v1/?{q}").get("response") or {}
+    settings = get_json(f"{STORE}/explore/discoveryqueuesettings/0", cookies=session.store_cookies())
+    task = settings.get("nSaleTaskCompleted")
+    return {"sale": bool(claim) or task is not None, "can_claim": bool(claim.get("can_claim")),
+            "next_claim": int(claim.get("next_claim_time") or 0), "queue_task": task}
+
+
+def explore_queue(session, pause=1.0):
+    """Go through one new Discovery Queue the way the store does when you press "next" on each
+    game; returns how many games it held."""
+    cookies = session.store_cookies()
+    d = post_json(f"{STORE}/explore/generatenewdiscoveryqueue", {"sessionid": session.sessionid, "queuetype": 0},
+                  cookies=cookies, headers={"Referer": f"{STORE}/explore/", "Origin": STORE})
+    queue = [int(a["appid"] if isinstance(a, dict) else a) for a in d.get("queue") or []]
+    if not queue:
+        raise RuntimeError("Steam didn't make a Discovery Queue")
+    for appid in queue:
+        url = f"{STORE}/app/{appid}"
+        status, body = request(url, data={"sessionid": session.sessionid, "appid_to_clear_from_queue": appid},
+                               cookies=cookies, headers={"Referer": f"{STORE}/explore/", "Origin": STORE})
+        if status != 200:
+            raise HttpError(status, body[:300], url)
+        time.sleep(pause)
+    return len(queue)
+
+
+def claim_sticker(session):
+    """Claim the sale's free item; returns its name (or None when Steam doesn't say)."""
+    url = f"https://api.steampowered.com/ISaleItemRewardsService/ClaimItem/v1/?access_token={session.store_token()}"
+    r = post_json(url, {"input_json": json.dumps({"language": "english"})}).get("response") or {}
+    item = r.get("reward_item") or {}
+    if not item and not r.get("next_claim_time"):
+        raise RuntimeError("Steam didn't hand out the sticker")
+    return (item.get("community_item_data") or {}).get("item_title") or item.get("item_title") or None
+
+
+# --- any market item, for price alerts -----------------------------------------------------------
+def search_market(prices, text):
+    """Market items whose name matches `text`, in any game: [{"appid", "hash", "name", "game", "icon",
+    "price"}] (the market's own order, 10 at most)."""
+    q = urllib.parse.urlencode({"norender": 1, "start": 0, "count": 10, "query": text, "search_descriptions": 0})
+    with prices.lock:
+        d = prices._ask(f"{COMMUNITY}/market/search/render/?{q}")
+    out = []
+    for it in d.get("results") or []:
+        a = it.get("asset_description") or {}
+        if not a.get("appid"):
+            continue
+        out.append({"appid": int(a["appid"]), "hash": it["hash_name"], "name": it.get("name") or it["hash_name"],
+                    "game": it.get("app_name") or "", "icon": a.get("icon_url", ""), "price": it.get("sell_price")})
+    return out
