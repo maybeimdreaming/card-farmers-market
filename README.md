@@ -21,10 +21,15 @@ your system.
   - You can also keep foils, keep every card from chosen games, set a minimum price, and match the lowest listing or undercut it by 1¢.
   - Only real card drops are handled automatically. A card that turns up any other way (a trade, a booster pack, one you bought to finish a badge) waits for your review.
 - **Sort the cards you already have.** "Sort cards I have" runs your whole inventory through the same rules. Cards already listed and waiting for confirmation are left out.
+- **What your cards are worth** at today's prices, shown under the figures (prices it doesn't know yet are looked up a game at a time).
+- **When to farm.** **Pause on battery** leaves games alone on a laptop away from its charger; **Farm only between** picks the hours of the day.
+- **Steam sale stickers.** During a Steam sale it explores your Discovery Queue three times a day and claims the sale's free daily sticker; between sales it only checks now and then whether one has started.
 
 ### Items
 
 The Items tab finds your other inventories (Counter-Strike 2, Team Fortress 2, the Steam inventory's backgrounds and emoticons, and so on) and prices what's marketable in the ones you switch on. Nothing is listed unless you say so: "New items" is Off until you change it, and its Auto mode only lists items that arrive after you turn it on. Items that haven't sold recently are left alone, so an old, high asking price isn't copied.
+Backgrounds and emoticons worth more as gems than sold (or that can't be sold) are suggested for gems instead (Review by
+default; Auto turns new ones into gems by itself). The tab also shows what the items in your chosen inventories are worth.
 
 ### Market
 
@@ -32,6 +37,8 @@ The Items tab finds your other inventories (Counter-Strike 2, Team Fortress 2, t
 
 - **Your listings next to today's prices.** A listing counts as undercut when what really sells (the lower of the cheapest listing and the day's median sale) is below yours. "Reprice" cancels it and lists it again at that price; listings can also be cancelled after a number of days.
 - **What you've earned.** A chart of the last 30 days, sales by day and by game, and an optional notice when something sells.
+- **All time.** Earnings by month and by game since your first sale, card sales per hour of idling, and **Export CSV** of every sale.
+- **Price alerts.** Search any market item (or press **Alert** on one in the Items tab) for a notice when it sells for at least a price, or is listed for at most one.
 
 ### Gems
 
@@ -63,9 +70,11 @@ tells you when some are waiting. Prices are looked up again just before each lis
 
 Get the latest version from the [Releases page](https://github.com/maybeimdreaming/card-farmers-market/releases):
 
-- **Windows 10/11:** `Card-Farm-Windows.zip`. Unzip it and run `Card Farm.exe`. Windows may say the publisher is unknown: **More info → Run anyway**. Closing the window while farming minimises it; use **Quit** at the top of the page to stop.
-- **macOS (Apple silicon and Intel):** `Card-Farm-macOS.zip`. Move `Card Farm` to Applications; the first time, right-click it and choose **Open** (it isn't notarised). (`Card-Farm-macOS-Intel.zip` is the same app, kept so older copies on Intel Macs can update.)
-- **Linux:** `card-farm.pyz`. `chmod +x card-farm.pyz && ./card-farm.pyz`, or install with pipx as below.
+- **Windows 10/11:** `Card-Farmers-Market-Windows.zip`. Unzip it and run `Card Farmer's Market.exe`. Windows may say the publisher is unknown: **More info → Run anyway**. Closing the window while farming minimises it; use **Quit** at the top of the page to stop.
+- **macOS (Apple silicon and Intel):** `Card-Farmers-Market-macOS.zip`. Move `Card Farmer's Market` to Applications; the first time, right-click it and choose **Open** (it isn't notarised).
+- **Linux:** `card-farmers-market.pyz`. `chmod +x card-farmers-market.pyz && ./card-farmers-market.pyz`, or install with pipx as below.
+
+Each release also carries the same program under the app's old names (`Card-Farm-*.zip`, `card-farm.pyz`, and a `-macOS-Intel.zip` copy), only so very old copies can still update themselves.
 
 Steam must be running and signed in, and you need the Steam mobile app with Steam Guard for the sign-in and for confirming market listings. Card Farmer's Market finds Steam's own API library (`steam_api64.dll`, `libsteam_api.dylib` or `libsteam_api.so`) in any game you have installed and doesn't ship a copy; on Linux, any Proton version has one.
 
@@ -137,7 +146,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest
 .venv/bin/python -m pytest tests
 python3 -m cardfarm                # window
 python3 -m cardfarm --background   # farm without opening the window
-python packaging/build.py linux    # dist/card-farm.pyz; windows / macos need: pip install pyinstaller pywebview pillow
+python packaging/build.py linux    # dist/card-farmers-market.pyz; windows / macos need: pip install pyinstaller pywebview pillow
 ```
 
 To check the layout after changing the page, `python3 tools/screenshots.py OUT_DIR` opens the real window on a

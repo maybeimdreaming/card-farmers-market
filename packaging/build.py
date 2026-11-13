@@ -1,9 +1,15 @@
-"""Builds Card Farm's downloads into dist/:
+"""Builds Card Farmer's Market's downloads into dist/:
 
-  python packaging/build.py linux     card-farm.pyz (runs with the system's Python and GTK)
-  python packaging/build.py windows   Card-Farm-Windows.zip ("Card Farm" folder with Card Farm.exe)
-  python packaging/build.py macos     Card-Farm-macOS.zip (Card Farm.app; for both kinds of Mac when built
-                                      with python.org's universal2 Python, else -Intel on an Intel Mac)
+  python packaging/build.py linux     card-farmers-market.pyz (runs with the system's Python and GTK)
+  python packaging/build.py windows   Card-Farmers-Market-Windows.zip ("Card Farmer's Market" folder with
+                                      Card Farmer's Market.exe)
+  python packaging/build.py macos     Card-Farmers-Market-macOS.zip (Card Farmer's Market.app; for both kinds
+                                      of Mac when built with python.org's universal2 Python, else -Intel on
+                                      an Intel Mac)
+
+Each also comes under the app's old name (Card-Farm-*, card-farm.pyz) with the old names inside
+(Card Farm.exe, Card Farm.app): the same program, for copies from before 0.3.0-beta.10, whose
+updater only knows those names.
 
 Windows and macOS need `pip install pyinstaller pywebview pillow` first. Every download carries
 THIRD-PARTY-NOTICES.txt: the licences of Python and of each library bundled into it (the .pyz
@@ -64,12 +70,15 @@ def linux():
     shutil.rmtree(stage, ignore_errors=True)
     shutil.copytree(ROOT / "cardfarm", stage / "cardfarm", ignore=shutil.ignore_patterns("__pycache__"))
     (stage / "__main__.py").write_text("from cardfarm.__main__ import main\n\nmain()\n")
-    zipapp.create_archive(stage, DIST / "card-farm.pyz", interpreter="/usr/bin/env python3", compressed=True)
+    zipapp.create_archive(stage, DIST / "card-farmers-market.pyz", interpreter="/usr/bin/env python3", compressed=True)
     shutil.rmtree(stage)
-    return DIST / "card-farm.pyz"
+    shutil.copy(DIST / "card-farmers-market.pyz", DIST / "card-farm.pyz")
+    return DIST / "card-farmers-market.pyz"
 
 
-NAME = "Card Farmer's Market"  # what people see; the files keep "Card Farm" so older copies can update
+NAME = "Card Farmer's Market"
+FILES = "Card-Farmers-Market"  # the downloads' names
+OLD, OLD_FILES = "Card Farm", "Card-Farm"  # the names before, kept for old copies' updaters
 
 
 def version():
@@ -82,8 +91,8 @@ def windows_details():
     numbers = tuple(int(n) for n in version().split(".")) + (0,)
     path = ROOT / "build" / "version-info.txt"
     path.parent.mkdir(exist_ok=True)
-    fields = {"CompanyName": "m4ybe", "FileDescription": NAME, "FileVersion": version(), "InternalName": "Card Farm",
-              "OriginalFilename": "Card Farm.exe", "ProductName": NAME, "ProductVersion": version(),
+    fields = {"CompanyName": "m4ybe", "FileDescription": NAME, "FileVersion": version(), "InternalName": NAME,
+              "OriginalFilename": f"{NAME}.exe", "ProductName": NAME, "ProductVersion": version(),
               "LegalCopyright": "MIT License"}
     strings = ", ".join(f"StringStruct({k!r}, {v!r})" for k, v in fields.items())
     path.write_text(f"""VSVersionInfo(
@@ -95,7 +104,7 @@ def windows_details():
 
 def pyinstaller(icon, extra=()):
     sep = ";" if sys.platform == "win32" else ":"
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--name", "Card Farm", *extra,
+    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--name", NAME, *extra,
                     "--icon", str(icon), "--add-data", f"{ROOT / 'cardfarm' / 'ui'}{sep}cardfarm/ui",
                     "--add-data", f"{ROOT / 'LICENSE'}{sep}.", "--osx-bundle-identifier", "io.github.cardfarm.CardFarm",
                     "--distpath", str(DIST), "--workpath", str(ROOT / "build"), "--specpath", str(ROOT / "build"),
@@ -104,17 +113,24 @@ def pyinstaller(icon, extra=()):
 
 def windows():
     pyinstaller(ROOT / "packaging" / "icon.png", ["--version-file", str(windows_details())])
-    folder = DIST / "Card Farm"
+    folder = DIST / NAME
     (folder / "THIRD-PARTY-NOTICES.txt").write_text(notices(), encoding="utf-8")
     shutil.copy(ROOT / "LICENSE", folder / "LICENSE.txt")
-    return shutil.make_archive(str(DIST / "Card-Farm-Windows"), "zip", DIST, "Card Farm")
+    # the old name: the same folder as "Card Farm" with Card Farm.exe (the program finds its files
+    # next to itself, whatever it's called)
+    old = DIST / OLD
+    shutil.rmtree(old, ignore_errors=True)
+    shutil.copytree(folder, old)
+    (old / f"{NAME}.exe").rename(old / f"{OLD}.exe")
+    shutil.make_archive(str(DIST / f"{OLD_FILES}-Windows"), "zip", DIST, OLD)
+    return shutil.make_archive(str(DIST / f"{FILES}-Windows"), "zip", DIST, NAME)
 
 
 def macos():
     import plistlib
     universal = {"x86_64", "arm64"} <= _archs(sys.executable)
     pyinstaller(ROOT / "packaging" / "icon.png", ["--target-arch", "universal2"] if universal else [])
-    app = DIST / "Card Farm.app"
+    app = DIST / f"{NAME}.app"
     if universal:
         _check_universal(app)
     info = app / "Contents" / "Info.plist"  # the shown name (menu bar, About) and version
@@ -125,10 +141,18 @@ def macos():
     # sign again after every change to the bundle (a change after signing breaks it on Apple silicon)
     subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
-    out = DIST / ("Card-Farm-macOS.zip" if universal or platform.machine() != "x86_64" else "Card-Farm-macOS-Intel.zip")
+    kind = "macOS" if universal or platform.machine() != "x86_64" else "macOS-Intel"
+    out = DIST / f"{FILES}-{kind}.zip"
     subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(out)], check=True)  # keeps the app's links and signature
-    if universal:  # Intel Macs on 0.3.0-beta.9 and older only look for the -Intel name
-        shutil.copy(out, DIST / "Card-Farm-macOS-Intel.zip")
+    # the old name: the same app as "Card Farm.app" (the signature doesn't cover the folder's name)
+    old = DIST / f"{OLD}.app"
+    shutil.rmtree(old, ignore_errors=True)
+    subprocess.run(["ditto", str(app), str(old)], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(old)], check=True)
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", str(old), str(DIST / f"{OLD_FILES}-{kind}.zip")], check=True)
+    if universal:  # Intel Macs on 0.3.0-beta.9 and older only look for the -Intel names
+        for name in (FILES, OLD_FILES):
+            shutil.copy(DIST / f"{name}-macOS.zip", DIST / f"{name}-macOS-Intel.zip")
     return out
 
 

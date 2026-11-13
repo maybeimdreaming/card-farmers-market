@@ -1,4 +1,4 @@
-# Builds Card Farm for Linux, Windows and macOS, checks each build really opens its window and
+# Builds Card Farmer's Market for Linux, Windows and macOS, checks each build really opens its window and
 # talks to the farm, and on a v* tag publishes them as a GitHub release.
 name: Release
 
@@ -27,12 +27,15 @@ jobs:
       - run: python packaging/build.py linux
       - name: The idler child starts from inside the .pyz
         run: |
-          set +e; python3 dist/card-farm.pyz --idle-child /no/such/library; code=$?; set -e
+          set +e; python3 dist/card-farmers-market.pyz --idle-child /no/such/library; code=$?; set -e
           test "$code" = 2
+          cmp dist/card-farmers-market.pyz dist/card-farm.pyz
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: dist/card-farm.pyz
+          path: |
+            dist/card-farmers-market.pyz
+            dist/card-farm.pyz
 
   windows:
     timeout-minutes: 5
@@ -49,33 +52,41 @@ jobs:
       - run: pip install pytest pyinstaller pywebview pillow
       - run: python -m pytest tests -q
       - run: python packaging/build.py windows
-      # Card Farm.exe itself stays unmarked: a marked exe gets SmartScreen's "unknown publisher"
+      # the program itself stays unmarked: a marked exe gets SmartScreen's "unknown publisher"
       # prompt, which a person clicks through (Run anyway) but would hang this unattended check
       - name: Mark the build as downloaded, like a browser does
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse -File "dist\Card Farm" | Where-Object Name -ne "Card Farm.exe" | ForEach-Object {
+          Get-ChildItem -Recurse -File "dist\Card Farmer's Market" | Where-Object Name -ne "Card Farmer's Market.exe" | ForEach-Object {
             Set-Content -Path $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
           }
-          if (-not (Get-Item "dist\Card Farm\_internal\pythonnet\runtime\Python.Runtime.dll" -Stream Zone.Identifier -ErrorAction SilentlyContinue)) { throw "mark not applied" }
+          if (-not (Get-Item "dist\Card Farmer's Market\_internal\pythonnet\runtime\Python.Runtime.dll" -Stream Zone.Identifier -ErrorAction SilentlyContinue)) { throw "mark not applied" }
       - name: The built app opens its window and shows the sign-in page
         shell: pwsh
         run: |
           $env:CARD_FARM_DATA = "$env:RUNNER_TEMP\cf-data"
           $env:CARD_FARM_SELFTEST = "$env:RUNNER_TEMP\selftest.json"
-          $p = Start-Process -FilePath "dist\Card Farm\Card Farm.exe" -PassThru
+          $p = Start-Process -FilePath "dist\Card Farmer's Market\Card Farmer's Market.exe" -PassThru
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "the window didn't finish its self-test" }
           Get-Content $env:CARD_FARM_SELFTEST
           if (-not (Get-Content $env:CARD_FARM_SELFTEST | ConvertFrom-Json).ok) { throw "self-test failed" }
       - name: The idler child starts from the built app
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath "dist\Card Farm\Card Farm.exe" -ArgumentList "--idle-child","C:\no\such\steam_api64.dll" -PassThru -Wait
+          $p = Start-Process -FilePath "dist\Card Farmer's Market\Card Farmer's Market.exe" -ArgumentList "--idle-child","C:\no\such\steam_api64.dll" -PassThru -Wait
           if ($p.ExitCode -ne 2) { throw "idler child exit code $($p.ExitCode)" }
+      - name: The old-name download holds the old names and runs
+        shell: pwsh
+        run: |
+          Expand-Archive dist\Card-Farm-Windows.zip "$env:RUNNER_TEMP\old"
+          $p = Start-Process -FilePath "$env:RUNNER_TEMP\old\Card Farm\Card Farm.exe" -ArgumentList "--idle-child","C:\no\such\steam_api64.dll" -PassThru -Wait
+          if ($p.ExitCode -ne 2) { throw "old-name idler child exit code $($p.ExitCode)" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/Card-Farm-Windows.zip
+          path: |
+            dist/Card-Farmers-Market-Windows.zip
+            dist/Card-Farm-Windows.zip
 
   macos:
     # one app for both kinds of Mac, built on an Intel Mac: GitHub's Apple silicon machines are often
@@ -101,7 +112,7 @@ jobs:
       - name: The built app opens its window and shows the sign-in page
         run: |
           export CARD_FARM_DATA="$RUNNER_TEMP/cf-data" CARD_FARM_SELFTEST="$RUNNER_TEMP/selftest.json"
-          "dist/Card Farm.app/Contents/MacOS/Card Farm" &
+          "dist/Card Farmer's Market.app/Contents/MacOS/Card Farmer's Market" &
           pid=$!
           for i in $(seq 120); do kill -0 $pid 2>/dev/null || break; sleep 1; done
           kill $pid 2>/dev/null && { echo "the window didn't finish its self-test"; exit 1; }
@@ -109,14 +120,20 @@ jobs:
           python3 -c "import json,sys; sys.exit(0 if json.load(open('$CARD_FARM_SELFTEST'))['ok'] else 1)"
       - name: The idler child starts from the built app
         run: |
-          set +e; "dist/Card Farm.app/Contents/MacOS/Card Farm" --idle-child /no/such/libsteam_api.dylib; code=$?; set -e
+          set +e; "dist/Card Farmer's Market.app/Contents/MacOS/Card Farmer's Market" --idle-child /no/such/libsteam_api.dylib; code=$?; set -e
+          test "$code" = 2
+          set +e; "dist/Card Farm.app/Contents/MacOS/Card Farmer's Market" --idle-child /no/such/libsteam_api.dylib; code=$?; set -e
           test "$code" = 2
       - name: The app's signature is intact
-        run: codesign --verify --deep --strict --verbose=2 "dist/Card Farm.app"
+        run: |
+          codesign --verify --deep --strict --verbose=2 "dist/Card Farmer's Market.app"
+          codesign --verify --deep --strict "dist/Card Farm.app"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
           path: |
+            dist/Card-Farmers-Market-macOS.zip
+            dist/Card-Farmers-Market-macOS-Intel.zip
             dist/Card-Farm-macOS.zip
             dist/Card-Farm-macOS-Intel.zip
 
@@ -131,16 +148,16 @@ jobs:
           name: macos
       - name: The app opens its window and shows the sign-in page
         run: |
-          ditto -x -k Card-Farm-macOS.zip .
+          ditto -x -k Card-Farmers-Market-macOS.zip .
           export CARD_FARM_DATA="$RUNNER_TEMP/cf-data" CARD_FARM_SELFTEST="$RUNNER_TEMP/selftest.json"
           test "$(uname -m)" = arm64
-          "Card Farm.app/Contents/MacOS/Card Farm" &
+          "Card Farmer's Market.app/Contents/MacOS/Card Farmer's Market" &
           pid=$!
           for i in $(seq 120); do kill -0 $pid 2>/dev/null || break; sleep 1; done
           kill $pid 2>/dev/null && { echo "the window didn't finish its self-test"; exit 1; }
           cat "$CARD_FARM_SELFTEST"
           python3 -c "import json,sys; sys.exit(0 if json.load(open('$CARD_FARM_SELFTEST'))['ok'] else 1)"
-          codesign --verify --deep --strict "Card Farm.app"
+          codesign --verify --deep --strict "Card Farmer's Market.app"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
