@@ -43,6 +43,7 @@ class WebviewApp:
             return 0
         self.farm = self.make_farm()
         self.farm.on_quit = self.quit
+        self.farm.open_humble = lambda url, check: threading.Thread(target=self._sign_in_window, args=(url, check), daemon=True).start()
         threading.Thread(target=self.farm.run, daemon=True).start()
         # a file:// address: pywebview starts its built-in web server only for bare paths
         page = pathlib.Path(HERE, "ui", "index.html").as_uri()
@@ -55,6 +56,32 @@ class WebviewApp:
                       storage_path=os.path.join(self.data_dir, "webview"))
         self._shutdown()
         return 0
+
+    def _sign_in_window(self, url, check):
+        """Another site's sign-in pages (Humble's) in a window of their own. Every 2 seconds, once
+        it's back from the sign-in pages, its cookies go to check(cookies); when that says signed
+        in, the window closes."""
+        if getattr(self, "_signing_in", None):
+            return
+        win = self._signing_in = webview.create_window("Sign in to Humble Bundle", url, width=560, height=780)
+        closed = []
+        win.events.closed += lambda: closed.append(True)
+        try:
+            while not closed and not self.quitting:
+                time.sleep(2)
+                try:
+                    if not (win.get_current_url() or "").startswith(url):
+                        continue
+                    cookies = {}
+                    for jar in win.get_cookies() or []:
+                        cookies.update({name: morsel.value for name, morsel in jar.items()})
+                except Exception:
+                    continue
+                if cookies and check(cookies):
+                    win.destroy()
+                    break
+        finally:
+            self._signing_in = None
 
     def _closing(self):
         """Closing while farming minimises: farming carries on. Returning False keeps the window."""

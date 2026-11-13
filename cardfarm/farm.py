@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 
-from . import extras, files, http, market, power, qr, quick, rules, steam, update
+from . import extras, files, http, humble, keys, market, power, qr, quick, rules, steam, update
 from .auth import NO_RENEWAL, Session
 from .idler import Idler, game_you_are_playing, steam_pid
 
@@ -52,7 +52,7 @@ def fresh_state():
 
 
 class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.QuickBadge, extras.SaleRewards,
-           extras.Worth, extras.Alerts):
+           extras.Worth, extras.Alerts, keys.KeyRedeemer, humble.Humble):
     def __init__(self, data_dir):
         self.data = data_dir
         os.makedirs(data_dir, exist_ok=True)
@@ -309,7 +309,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
             if s["cancel_after_days"] and time.time() >= self._next_listings:
                 self._next_listings = time.time() + market.LISTINGS_EVERY
                 self.check_listings()
-            for chore in (self._sale_chore, self._alerts_chore, self._worth_chore):
+            for chore in (self._sale_chore, self._alerts_chore, self._worth_chore, self._keys_chore):
                 try:
                     chore()
                 except Exception as e:
@@ -944,6 +944,7 @@ class Farm(market.MarketParts, market.HeldBoosters, market.PatientBuying, quick.
                 "ui": _page_version(), "version": update.VERSION,
                 "update": self.update and dict(self.update, installable=bool(self.update.get("url"))),
                 "listings": st["listings"], "sales": dict(self.sales_summary(), lifetime=self.lifetime()), "gems": st["gems"],
+                "keys": self.keys_snapshot(), "humble": self.humble_snapshot(),
                 "sale": st["sale"], "worth": self.worth(), "alerts": st["alerts"], "alert_search": st["alert_search"],
                 "power": {"battery": self._on_battery, "in_hours": power.in_hours(self.settings["hours_from"], self.settings["hours_to"])},
                 "boosters": dict(st["boosters"], options=[o for o in st["boosters"]["options"] if o.get("profit") is not None][:150]),

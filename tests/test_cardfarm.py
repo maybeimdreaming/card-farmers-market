@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import pathlib
 import sys
 import threading
@@ -1624,3 +1625,59 @@ def test_buy_orders_are_read_from_one_big_page(monkeypatch):
         {"buy_orderid": str(k), "quantity_remaining": "1"} for k in range(14)]})
     s = type("S", (), {"cookies": lambda self: {}})()
     assert len(steam.buy_orders(s)) == 14 and "count=100" in asked[0]
+
+
+# --- redeeming keys ------------------------------------------------------------------------------------
+from cardfarm import humble as humble_mod, keys as keys_mod
+
+
+def test_keys_are_found_in_any_text():
+    text = "Thanks!\nYour key: abcde-12345-fghij\nSame again ABCDE-12345-FGHIJ, a 5x5 one AAAAA-BBBBB-CCCCC-DDDDD-EEEEE.\n" \
+           "Not keys: XXXXX-XXXXX, 123456-12345-12345, order AB12C-DE34F-GH56I-JK78"
+    assert keys_mod.find_keys(text) == ["ABCDE-12345-FGHIJ", "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"]
+
+
+def test_keys_are_redeemed_in_order_and_wait_out_steams_limit(world, monkeypatch):
+    f = world["make"]()
+    monkeypatch.setattr(keys_mod, "GAP", 0)
+    answers = {"AAAAA-AAAAA-AAAA1": {"code": 0, "names": ["Paper Lanterns"]}, "AAAAA-AAAAA-AAAA2": {"code": 9, "names": ["Tidewater"]},
+               "AAAAA-AAAAA-AAAA3": {"code": 14, "names": []}, "AAAAA-AAAAA-AAAA4": {"code": 53, "names": []}}
+    tried = []
+    monkeypatch.setattr(steam, "redeem_key", lambda s, k: tried.append(k) or answers[k])
+    f.add_keys("AAAAA-AAAAA-AAAA1 AAAAA-AAAAA-AAAA2\nAAAAA-AAAAA-AAAA3 AAAAA-AAAAA-AAAA4 AAAAA-AAAAA-AAAA5")
+    for _ in range(100):
+        if "keys" not in f.busy:
+            break
+        time.sleep(0.02)
+    snap = f.keys_snapshot()
+    assert [k["status"] for k in snap["list"]] == ["added", "owned", "invalid", "waiting", "waiting"]
+    assert snap["paused_until"] > time.time() + 3000 and tried[-1] == "AAAAA-AAAAA-AAAA4"
+    assert all(k["key"].startswith("•••••-") for k in snap["list"])          # the page never sees whole keys
+    assert sys.platform == "win32" or oct(os.stat(f._keys_path()).st_mode & 0o777) == "0o600"
+    f._keys_chore()                                                           # the hour isn't up: nothing
+    assert len(tried) == 4
+    with pytest.raises(ValueError):
+        f.add_keys("AAAAA-AAAAA-AAAA1")                                       # nothing new in it
+    f.clear_keys("done")
+    assert [k["status"] for k in f.keys_snapshot()["list"]] == ["waiting", "waiting"]
+    f._key_box = None                                                         # read back from keys.json
+    assert len(f._keys()["list"]) == 2
+
+
+def test_humble_sign_in_is_kept_once_humble_says_so(world, monkeypatch, tmp_path):
+    f = world["make"]()
+    with pytest.raises(ValueError):
+        f.humble_sign_in()                                                    # no window to open it in
+    opened = []
+    f.open_humble = lambda url, check: opened.append((url, check))
+    f.humble_sign_in()
+    url, check = opened[0]
+    assert url.startswith("https://www.humblebundle.com/")
+    monkeypatch.setattr(humble_mod.http, "request", lambda u, cookies=None, **kw: (200, '{"status": "anonymous"}'))
+    assert check({"x": "1"}) is False and not f.humble_snapshot()["signed_in"]
+    monkeypatch.setattr(humble_mod.http, "request", lambda u, cookies=None, **kw: (200, '{"status": "active", "email": "me@example.com"}'))
+    assert check({"x": "1"}) is True
+    assert f.humble_snapshot() == dict(f.humble_snapshot(), signed_in=True, who="me@example.com")
+    assert sys.platform == "win32" or oct(os.stat(tmp_path / "humble.json").st_mode & 0o777) == "0o600"
+    f.humble_sign_out()
+    assert not f.humble_snapshot()["signed_in"]

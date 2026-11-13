@@ -39,6 +39,7 @@ class CardFarmApp(Adw.Application):
         self.farm = self.make_farm()
         self.farm.notify = lambda title, body: GLib.idle_add(self._notify, title, body)
         self.farm.on_quit = lambda: GLib.idle_add(self.quit)
+        self.farm.open_humble = lambda url, check: GLib.idle_add(self._sign_in_window, url, check)
         threading.Thread(target=self.farm.run, daemon=True).start()
         WebKit.WebContext.get_default().register_uri_scheme("cardfarm", self._answer)
         for name, accels, act in (("quit", ["<Control>q"], self.quit),
@@ -131,6 +132,46 @@ class CardFarmApp(Adw.Application):
         Gtk.UriLauncher.new(uri).launch(self.window, None, None, None)
         decision.ignore()
         return True
+
+    def _sign_in_window(self, url, check):
+        """Another site's sign-in pages (Humble's) in a window of their own, with cookies kept apart
+        from the app's page. Every 2 seconds its cookies go to check(cookies) on a worker thread;
+        once that says signed in, the window closes. Nothing is remembered by the window itself."""
+        if getattr(self, "_signing_in", None):
+            self._signing_in.present()
+            return False
+        session = WebKit.NetworkSession.new_ephemeral()
+        view = WebKit.WebView(network_session=session)
+        win = Gtk.Window(title="Sign in to Humble Bundle", transient_for=self.window, default_width=560, default_height=780)
+        win.set_child(view)
+        self._signing_in = win
+        done = []
+
+        def closed(*a):
+            done.append(True)
+            self._signing_in = None
+            return False
+        win.connect("close-request", closed)
+        # a sign-in that opens a popup (Google's) goes on in this same window instead
+        view.connect("create", lambda v, action: (v.load_request(action.get_request()), None)[1])
+        view.load_uri(url)
+        win.present()
+
+        def got(manager, result):
+            try:
+                cookies = {c.get_name(): c.get_value() for c in manager.get_cookies_finish(result)}
+            except GLib.Error:
+                return
+            threading.Thread(target=lambda: check(cookies) and GLib.idle_add(win.close), daemon=True).start()
+
+        def poll():
+            if done:
+                return False
+            if (view.get_uri() or "").startswith(url):  # back from the sign-in pages
+                session.get_cookie_manager().get_cookies(url, None, got)
+            return True
+        GLib.timeout_add_seconds(2, poll)
+        return False
 
     def _hold(self):
         if not self.held:

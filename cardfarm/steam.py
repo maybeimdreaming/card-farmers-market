@@ -848,3 +848,15 @@ def search_market(prices, text):
         out.append({"appid": int(a["appid"]), "hash": it["hash_name"], "name": it.get("name") or it["hash_name"],
                     "game": it.get("app_name") or "", "icon": a.get("icon_url", ""), "price": it.get("sell_price")})
     return out
+
+
+# --- redeeming product keys -------------------------------------------------------------------------
+def redeem_key(session, key):
+    """Add a product key to the account. Returns {"code": Steam's result (0: added), "names": what the
+    key holds (Steam names it when it's added, and when you own it already)}."""
+    r = post_json(f"{STORE}/account/ajaxregisterkey/", {"product_key": key, "sessionid": session.sessionid},
+                  cookies=session.store_cookies(), headers={"Referer": f"{STORE}/account/registerkey", "Origin": STORE})
+    items = ((r.get("purchase_receipt_info") or {}).get("line_items")) or []
+    names = [i.get("line_item_description") for i in items if i.get("line_item_description")]
+    code = 0 if r.get("success") == 1 else int(r.get("purchase_result_details") or -1)
+    return {"code": code, "names": names}

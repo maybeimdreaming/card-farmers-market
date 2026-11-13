@@ -63,7 +63,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 26px 20px 64px; }
   background: var(--grass) repeat-x bottom left / 180px 18px; }
 .mast .who, .mast .ver { font-size: 12px; color: var(--turf-ink); opacity: .8; }
 .mast .who { margin-left: auto; }
-@media (max-width: 1250px) { .mast .who { display: none; } }
+@media (max-width: 1400px) { .mast .who { display: none; } }
 .mast .small-go { padding: 5px 10px; font-size: 12px; background: var(--cream); border-color: var(--cream); color: var(--cream-ink); }
 .mast a { color: var(--turf-ink); text-decoration: none; font-size: 13px; opacity: .85; }
 .mast a:hover { opacity: 1; text-decoration: underline; }
@@ -75,9 +75,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 26px 20px 64px; }
 .tabs button:hover:not(:disabled) { background: none; opacity: 1; }
 .tabs button.on { opacity: 1; background: var(--turf-deep); }
 .tabs button .count { font-size: 12px; margin-left: 6px; opacity: .85; font-variant-numeric: tabular-nums; }
-@media (max-width: 620px) {  /* tabs wrap onto two rows, each row filled */
+@media (max-width: 620px) {  /* tabs wrap onto two rows of three */
   .tabs { width: 100%; flex-wrap: wrap; overflow: visible; }
-  .tabs button { flex: 1 1 auto; padding: 10px 8px 9px; }
+  .tabs button { flex: 1 1 30%; padding: 10px 8px 9px; }
 }
 /* theme switcher, small, in the turf */
 .mast .pick.theme { border-color: rgba(255, 255, 255, .28); }
@@ -208,6 +208,10 @@ td.acts a:hover { color: var(--ink); text-decoration: underline; }
 /* Quick badge: a search box, the badge's level as five pips, each card's listings by price */
 input.find { font: 500 13.5px/1 var(--font-ui); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule-strong);
   border-radius: var(--radius); padding: 8px 10px; width: 240px; max-width: 100%; }
+#keys-text { width: 100%; box-sizing: border-box; margin: 12px 0 4px; padding: 10px 12px; border-radius: 10px; resize: vertical;
+  border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); font: 500 13px/1.45 var(--font-mono, monospace); }
+.status { font-size: 12.5px; font-weight: 600; }
+.status.added { color: var(--sell); } .status.waiting { color: var(--faint); } .status.bad { color: var(--warn); }
 .hours { display: inline-flex; align-items: center; gap: 6px; }
 .hours input { width: 52px; }
 .split.inner { gap: 20px; align-items: start; }
@@ -284,7 +288,7 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
   <div class="mast">
     <div class="flowers" id="flowers"></div>
     <div class="tabs" id="tabs" hidden>
-      <button data-tab="cards">Cards<span class="count" id="tab-cards"></span></button><button data-tab="items">Items<span class="count" id="tab-items"></span></button><button data-tab="market">Market<span class="count" id="tab-market"></span></button><button data-tab="gems">Gems<span class="count" id="tab-gems"></span></button><button data-tab="badges">Badges</button>
+      <button data-tab="cards">Cards<span class="count" id="tab-cards"></span></button><button data-tab="items">Items<span class="count" id="tab-items"></span></button><button data-tab="market">Market<span class="count" id="tab-market"></span></button><button data-tab="gems">Gems<span class="count" id="tab-gems"></span></button><button data-tab="badges">Badges</button><button data-tab="keys">Keys<span class="count" id="tab-keys"></span></button>
     </div>
     <span class="pick theme" data-key="theme" title="Theme"><button data-v="auto">Auto</button><button data-v="light">Light</button><button data-v="dark">Dark</button><button data-v="pink">Pink</button></span>
     <span class="who" id="who"></span>
@@ -678,6 +682,39 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
     </section>
     </div>
 
+    <div id="tab-panel-keys" hidden>
+    <section>
+      <div class="figures">
+        <div><b id="k-waiting">–</b><span>Waiting</span></div>
+        <div><b id="k-added">–</b><span>Added to Steam</span></div>
+        <div><b id="k-owned">–</b><span>Owned already</span></div>
+        <div><b id="k-problems">–</b><span>Problems</span></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="head"><h2>Redeem Steam keys</h2>
+        <div class="tools"><button id="keys-clear">Clear finished</button><button id="keys-go" class="go" disabled>Redeem keys</button></div></div>
+      <textarea id="keys-text" rows="5" spellcheck="false" autocomplete="off" aria-label="Keys to redeem"
+        placeholder="Paste keys, an email or a whole page: every Steam key in it is found (XXXXX-XXXXX-XXXXX)"></textarea>
+      <div class="alert" id="keys-paused" hidden></div>
+      <p class="note">Keys are added one after another. Steam allows only so many tries an hour (wrong keys count the most); when it says
+        to slow down, the rest wait and go on by themselves. Keys stay on this computer only.</p>
+      <div class="scroll">
+        <table>
+          <thead id="keys-head"><tr><th>Key</th><th>What it is</th><th class="pl">Result</th><th class="r hide-sm">When</th><th></th></tr></thead>
+          <tbody id="keys"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="humble-section">
+      <div class="head"><h2>Humble Bundle</h2>
+        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
+      <p class="note" id="humble-note">Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.</p>
+    </section>
+    </div>
+
     <section>
       <div class="head"><h2>Activity</h2></div>
       <div class="tape"></div>
@@ -710,7 +747,7 @@ const age = t => { const d = (Date.now() / 1000 - t) / 86400; return d < 1 ? hou
 const busyText = (s, job, idle, working) => s.busy.includes(job) ? (s.progress[job] || working) : idle;
 let state = null, qrShown = null, uiVersion = null;
 let tab = "cards";
-try { const t = localStorage.getItem("tab"); tab = ["items", "market", "gems", "badges"].includes(t) ? t : t === "levelup" ? "badges" : "cards"; } catch {}
+try { const t = localStorage.getItem("tab"); tab = ["items", "market", "gems", "badges", "keys"].includes(t) ? t : t === "levelup" ? "badges" : "cards"; } catch {}
 
 // Windows and macOS open the page as a file and reach the farm through pywebview's bridge;
 // the Linux window serves it from cardfarm:// and answers fetch()
@@ -1162,6 +1199,37 @@ function renderAlerts(s) {
     : '<tr><td colspan="6" class="empty">No alerts. Search for an item above, or press Alert on one in the Items tab.</td></tr>');
 }
 
+// the same pattern as cardfarm/keys.py: 5-5-5 or 5-5-5-5-5 letters and digits
+const KEY_RE = /(?<![A-Z0-9-])[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}(?:-[A-Z0-9]{5}-[A-Z0-9]{5})?(?![A-Z0-9-])/g;
+const keysIn = text => [...new Set(text.toUpperCase().match(KEY_RE) || [])];
+const KEY_WORDS = {waiting: "waiting", added: "added", owned: "owned already", region: "not for your region", invalid: "not a valid key",
+  used: "used by another account", needs_base: "needs the base game", wallet: "wallet code", error: "Steam refused it"};
+function renderKeys(s) {
+  const K = s.keys, n = keysIn($("#keys-text").value).length, busy = s.busy.includes("keys");
+  $("#tab-keys").textContent = K.counts.waiting || "";
+  $("#k-waiting").textContent = K.counts.waiting; $("#k-added").textContent = K.counts.added;
+  $("#k-owned").textContent = K.counts.owned; $("#k-problems").textContent = K.problems;
+  $("#keys-go").disabled = !n;
+  $("#keys-go").textContent = n ? `Redeem ${n} key${n > 1 ? "s" : ""}` : "Redeem keys";
+  $("#keys-clear").disabled = !K.list.some(k => k.status !== "waiting");
+  const paused = K.paused_until ? new Date(K.paused_until * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "";
+  $("#keys-paused").hidden = !paused;
+  $("#keys-paused").textContent = paused ? `Steam asked to slow down: the waiting keys go on at about ${paused}.` : "";
+  $("#keys-head").hidden = !K.list.length;
+  const list = [...K.list].reverse();
+  fill($("#keys"), list.length ? list.map(k => `<tr class="${k.status === "waiting" ? "" : k.status === "added" ? "" : "dim"}">
+      <td class="num nowrap">${esc(k.key)}</td><td>${esc(k.names.join(", ")) || '<span class="faint">–</span>'}</td>
+      <td class="pl"><span class="status ${k.status === "added" ? "added" : k.status === "waiting" || k.status === "owned" ? "waiting" : "bad"}">${
+        k.status === "waiting" && busy && s.progress.keys ? "redeeming…" : KEY_WORDS[k.status] || k.status}</span></td>
+      <td class="r num hide-sm nowrap">${k.at ? ago(k.at) + (ago(k.at) === "just now" ? "" : " ago") : ""}</td>
+      <td class="acts">${k.status === "waiting" && busy ? "" : `<button class="link" data-key-clear="${esc(k.id)}">Remove</button>`}</td></tr>`).join("")
+    : '<tr><td colspan="5" class="empty">No keys yet. Paste some above.</td></tr>');
+  const h = s.humble;
+  $("#humble-in").hidden = h.signed_in; $("#humble-out").hidden = !h.signed_in;
+  $("#humble-note").textContent = h.signed_in ? `Signed in to Humble${h.who ? " as " + h.who : ""}.`
+    : "Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.";
+}
+
 function renderTape(history) {
   const html = history.map(h => `<div class="${h.kind}"><span class="mark">${MARK[h.kind] || "·"}</span><time>${new Date(h.at * 1000)
     .toLocaleString([], {month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false})}</time><span class="t">${esc(h.text)}</span></div>`).join("");
@@ -1246,6 +1314,7 @@ function render(s) {
   renderOrders(s);
   renderLife(s);
   renderAlerts(s);
+  renderKeys(s);
 }
 
 async function load() {
@@ -1275,6 +1344,7 @@ document.addEventListener("click", e => {
     tab = "market"; try { localStorage.setItem("tab", tab); } catch {}
     renderTabs(); renderAlerts(state); return $("#alerts-section").scrollIntoView({behavior: "smooth"}); }
   if (d.alertRemove) return post("/api/alerts/remove", {id: d.alertRemove});
+  if (d.keyClear) return post("/api/keys/clear", {which: d.keyClear});
   if (t.classList.contains("toggle")) return setting(d.key, !t.classList.contains("on"));
   const pick = t.closest(".pick");
   if (pick) {
@@ -1375,6 +1445,11 @@ $("#items-all-sell").onclick = () => confirm(`List all ${state.items.review.leng
 $("#items-suggested").onclick = () => { const n = state.items.review.filter(e => e.action === "gems").length;
   return confirm(`Do the suggestion for all ${state.items.review.length} items?` + (n ? ` ${n} turn into gems, which can't be undone.` : ""))
     && post("/api/items/review", {ids: "all", action: "suggested"}); };
+$("#keys-text").oninput = () => state && renderKeys(state);
+$("#keys-go").onclick = async () => { const r = await post("/api/keys/add", {text: $("#keys-text").value}); if (r.added) $("#keys-text").value = ""; };
+$("#keys-clear").onclick = () => post("/api/keys/clear", {which: "done"});
+$("#humble-in").onclick = () => post("/api/humble/sign-in");
+$("#humble-out").onclick = () => confirm("Sign out of Humble Bundle in this app?") && post("/api/humble/sign-out");
 $("#sales-export").onclick = async () => { const r = await post("/api/sales/export"); if (r.path) alert(`Saved to ${r.path}`); };
 $("#alert-find").onsubmit = e => { e.preventDefault(); const text = $("#alert-text").value.trim();
   if (text.length < 2) return;

@@ -105,6 +105,14 @@ def route(farm, path, body):
         return farm.remove_alert(str(body["id"]))
     if path == "/api/sales/export":
         return farm.export_sales()
+    if path == "/api/keys/add":  # {"text"}
+        return farm.add_keys(body.get("text"))
+    if path == "/api/keys/clear":  # {"which": "done" | a key's id}
+        return farm.clear_keys(str(body.get("which") or "done"))
+    if path == "/api/humble/sign-in":
+        return farm.humble_sign_in()
+    if path == "/api/humble/sign-out":
+        return farm.humble_sign_out()
     if path == "/api/update":
         return farm.install_update()
     if path == "/api/refresh":
