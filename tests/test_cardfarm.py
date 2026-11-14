@@ -1698,64 +1698,40 @@ def test_humble_titles_match_steam_names_only_when_sure():
     assert not humble_mod.owned("Paper Lanterns 2", mine) and not humble_mod.owned("", mine)  # unsure: queued
 
 
-def test_humble_library_reply_and_keys_are_read():
-    reply = '0:{"a":"$@1","f":"","b":"x"}\n1:{"results":[],"pagination":{"page":1,"totalPages":3,"totalDocs":12},"success":true}\n'
-    assert humble_mod.parse_library_reply(reply)["pagination"]["totalPages"] == 3
-    assert humble_mod.parse_library_reply("<html>nope</html>") is None
+def test_humble_revealed_steam_keys_are_read():
     items = [humble_item("Paper Lanterns", "AAAAA-AAAAA-AAAA1"), humble_item("One Month of IGN Plus", kind="generic"),
              humble_item("Unrevealed"), humble_item("Old", "AAAAA-AAAAA-AAAA9", expired=True)]
     assert humble_mod.steam_keys(items) == [("AAAAA-AAAAA-AAAA1", "Paper Lanterns")]        # revealed, unexpired Steam keys only
-    body, ctype = humble_mod.library_form(2)
-    boundary = ctype.split("boundary=")[1]
-    assert body.startswith(f"--{boundary}\r\n") and body.endswith(f"--{boundary}--\r\n")
-    assert 'name="1_page"\r\n\r\n2\r\n' in body and 'name="1_limit"\r\n\r\n5\r\n' in body and '"$K1"' in body
 
 
-def test_humble_scan_finds_the_action_and_queues_keys_for_games_you_dont_have(world, monkeypatch):
+def test_humble_scan_reads_the_library_and_queues_keys_for_games_you_dont_have(world, monkeypatch):
     f = world["make"]()
-    f._humble_box = {"cookies": {"session": "x"}, "library_action": "dead" * 10}
-    monkeypatch.setattr(humble_mod, "PAGE_GAP", 0)
+    f._humble_box = {"cookies": {"session": "x"}}
     monkeypatch.setattr(keys_mod, "GAP", 0)
-    action = "7f" + "0" * 40
-    pages = {1: [humble_item("Paper Lanterns", "AAAAA-AAAAA-AAAA1"), humble_item("Brand New", "AAAAA-AAAAA-AAAA2")],
-             2: [humble_item("One Month of IGN Plus", kind="generic"), humble_item("Also New", "AAAAA-AAAAA-AAAA3")]}
-    asked = []
-
-    def request(url, cookies=None, headers=None, raw=None, **kw):
-        asked.append((url, (headers or {}).get("Next-Action")))
-        if url.endswith("/api/auth/session-status"):
-            return 200, '{"status": "active"}'
-        if raw is not None:                                                    # the library action
-            if headers["Next-Action"] != action:
-                return 404, "Server action not found."
-            n = int(raw.split('name="1_page"\r\n\r\n')[1].split("\r\n")[0])
-            return 200, "0:{}\n1:" + json.dumps({"results": pages[n], "pagination": {"page": n, "totalPages": 2}, "success": True})
-        if url == humble_mod.LIBRARY:
-            return 200, '<script src="/_next/static/chunks/aa.js"></script><script src="/_next/static/chunks/bb.js"></script>'
-        if url.endswith("bb.js"):
-            return 200, f'let ro=(0,rn.createServerReference)("{action}",rn.callServer,void 0,rn.findSourceMapURL,"filterUserLibrary");'
-        return 200, "nothing here"
-    monkeypatch.setattr(humble_mod.http, "request", request)
-    monkeypatch.setattr(humble_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(humble_mod.http, "request", lambda u, cookies=None, **kw: (200, '{"status": "active"}'))
+    f._humble_scan()                                                           # no window to read it in
+    assert "window" in f.humble_snapshot()["last_scan"]["error"]
+    library = [humble_item("Paper Lanterns", "AAAAA-AAAAA-AAAA1"), humble_item("Brand New", "AAAAA-AAAAA-AAAA2"),
+               humble_item("One Month of IGN Plus", kind="generic"), humble_item("Also New", "AAAAA-AAAAA-AAAA3"),
+               humble_item("Not Yet")]
+    reads = []
+    f.read_humble_library = lambda url, progress: reads.append(url) or progress(1, 1) or library
     monkeypatch.setattr(steam, "owned_names", lambda s: {1: "Paper Lanterns", 2: "Elsewhere"})
     redeemed = []
     monkeypatch.setattr(steam, "redeem_key", lambda s, k: redeemed.append(k) or {"code": 0, "names": []})
     f._humble_scan()
     scan = f.humble_snapshot()["last_scan"]
-    assert scan == dict(scan, steam_keys=3, owned=1, queued=2, listed_before=0) and "error" not in scan
-    assert f._humble()["library_action"] == action and "library_action_fresh" not in f._humble()
-    queued = {k["names"][0] for k in f._keys()["list"] if k["source"] == "humble"}
-    assert queued == {"Brand New", "Also New"}                                 # Paper Lanterns is on the account already
+    assert scan == dict(scan, items=5, steam_keys=3, owned=1, queued=2, listed_before=0, unrevealed=1) and "error" not in scan
+    assert reads == [humble_mod.LIBRARY]
+    assert {k["names"][0] for k in f._keys()["list"] if k["source"] == "humble"} == {"Brand New", "Also New"}
     for _ in range(100):
         if "keys" not in f.busy:
             break
         time.sleep(0.02)
     assert sorted(redeemed) == ["AAAAA-AAAAA-AAAA2", "AAAAA-AAAAA-AAAA3"]
-    f._humble_scan()                                                           # again: nothing new, no rediscovery
+    assert {k["names"][0] for k in f._keys()["list"]} >= {"Brand New", "Also New"}  # Steam named nothing: Humble's title stays
+    f._humble_scan()                                                           # again: nothing new
     assert f.humble_snapshot()["last_scan"]["queued"] == 0
-    assert sum(1 for url, _ in asked if url.endswith("bb.js")) == 1
-    pages[2] = pages[1]                                                        # Humble repeating its first page
-    asked.clear()
+    f.read_humble_library = lambda url, progress: library[:1] * 5             # the same item on every page
     f._humble_scan()
-    assert "first page" in f.humble_snapshot()["last_scan"]["error"]
-    assert sum(1 for _, a in asked if a == action) == 2                        # stopped at page 2, not page 200
+    assert "same items" in f.humble_snapshot()["last_scan"]["error"]

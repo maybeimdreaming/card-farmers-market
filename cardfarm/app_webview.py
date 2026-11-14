@@ -44,6 +44,7 @@ class WebviewApp:
         self.farm = self.make_farm()
         self.farm.on_quit = self.quit
         self.farm.open_humble = lambda url, check: threading.Thread(target=self._sign_in_window, args=(url, check), daemon=True).start()
+        self.farm.read_humble_library = self._read_library
         threading.Thread(target=self.farm.run, daemon=True).start()
         # a file:// address: pywebview starts its built-in web server only for bare paths
         page = pathlib.Path(HERE, "ui", "index.html").as_uri()
@@ -83,6 +84,56 @@ class WebviewApp:
         finally:
             self._signing_in = None
 
+    def _read_library(self, url, progress):
+        """Every item of the Humble library, read by Humble's own library page in a window of its
+        own (the farm's thread waits here). The page asks Humble for 5 items at a time; a little
+        script in it keeps each answer, and the page is sent on through its pages the way its own
+        links do it (?page=N). Requests made any other way get only the first page back."""
+        win = webview.create_window("Reading your Humble library", url, width=760, height=720, minimized=True)
+        loaded, closed = threading.Event(), []
+        win.events.loaded += loaded.set
+        win.events.closed += lambda: closed.append(True)
+
+        def js(code):
+            if closed or self.quitting:
+                raise ValueError("the Humble window was closed")
+            return win.evaluate_js(code)
+
+        def wait_for(page, seconds=45):
+            end = time.time() + seconds
+            while time.time() < end:
+                got = js(f"window.__cfLib && window.__cfLib.pages[{page}] ? JSON.stringify(window.__cfLib.pages[{page}]) : ''")
+                if got:
+                    return json.loads(got)
+                time.sleep(0.5)
+            raise ValueError(f"Humble's library didn't show page {page}")
+
+        try:
+            if not loaded.wait(60):
+                raise ValueError("Humble's library page didn't load")
+            time.sleep(2)
+            if not (js("location.href") or "").startswith(url):
+                raise ValueError("Humble signed this app out - sign in to Humble again")
+            js(LIBRARY_HOOK)
+            pages, page, last = {}, 2, 2
+            while page <= last:                       # page 1 was fetched before the script was in: it comes last
+                progress(page - 1, last)
+                js(f"window.__cfLib.pages = {{}}; history.pushState(null, '', '?page={page}')")
+                d = wait_for(page)
+                pages[page] = d
+                last = max(1, int((d.get("pagination") or {}).get("totalPages") or 1))
+                page += 1
+                time.sleep(1)
+            js("window.__cfLib.pages = {}; history.pushState(null, '', '?page=1')")
+            pages[1] = wait_for(1)
+            progress(last, last)
+            return [item for n in sorted(pages) for item in pages[n].get("results") or []]
+        finally:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
     def _closing(self):
         """Closing while farming minimises: farming carries on. Returning False keeps the window."""
         if self.quitting:
@@ -108,6 +159,7 @@ class WebviewApp:
         if selftest:
             return _selftest(self, selftest)
         flag = os.path.join(self.data_dir, "show-window")
+        scan = os.path.join(self.data_dir, "humble-scan")   # `touch` it to scan the Humble library from outside
         while not self.quitting:
             if os.path.exists(flag):
                 try:
@@ -116,7 +168,37 @@ class WebviewApp:
                     pass
                 self.window.restore()
                 self.window.show()
+            if os.path.exists(scan):
+                try:
+                    os.remove(scan)
+                    self.farm.humble_scan()
+                except Exception as e:
+                    self.farm.log(f"Couldn't start the Humble scan: {e}", "warn")
             time.sleep(1)
+
+
+# Put into Humble's library page: keeps every answer the page gets from its library action
+# (React's line format: the line holding {results, pagination}), by the page number in the
+# address at the time - the answer's own page field always says 1.
+LIBRARY_HOOK = r"""
+(function () {
+  if (window.__cfLib) return;
+  window.__cfLib = {pages: {}};
+  var plain = window.fetch;
+  window.fetch = function (input, init) {
+    var asked = new URLSearchParams(location.search).get("page") || "1";
+    var headers = (init && init.headers) || {};
+    var action = headers["Next-Action"] || headers["next-action"] || (headers.get && headers.get("Next-Action"));
+    return plain.apply(this, arguments).then(function (r) {
+      if (action) r.clone().text().then(function (t) {
+        var line = t.split("\n").find(function (l) { return /^[0-9a-f]+:\{.*"results"/.test(l); });
+        if (line) window.__cfLib.pages[asked] = JSON.parse(line.slice(line.indexOf(":") + 1));
+      }).catch(function () {});
+      return r;
+    });
+  };
+})();
+"""
 
 
 # --- one copy at a time, without any network port ----------------------------------------------

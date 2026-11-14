@@ -1234,10 +1234,11 @@ function renderKeys(s) {
   $("#humble-scan").hidden = !h.signed_in; $("#humble-scan").disabled = scanning;
   $("#humble-scan").textContent = scanning ? "Scanning…" : "Scan library";
   const scanNote = scanning ? (s.progress.humble || "Reading your Humble library…")
-    : !L ? (h.signed_in ? "Scan library reads your Humble library and adds every revealed Steam key for a game you don't have yet to the list above." : "")
+    : !L ? (h.signed_in ? "Scan library opens your Humble library in a small window (minimised) and adds every revealed Steam key for a game you don't have yet to the list above." : "")
     : L.error ? `Last scan didn't finish: ${L.error}`
-    : `Last scan ${ago(L.at)}${ago(L.at) === "just now" ? "" : " ago"}: ${L.steam_keys} Steam keys, ${L.owned} for games you have,`
-      + ` ${L.queued} added to the list${L.listed_before ? `, ${L.listed_before} on it already` : ""}.`;
+    : `Last scan ${ago(L.at)}${ago(L.at) === "just now" ? "" : " ago"}: ${L.steam_keys} revealed Steam keys, ${L.owned} for games you have,`
+      + ` ${L.queued} added to the list${L.listed_before ? `, ${L.listed_before} on it already` : ""}`
+      + `${L.unrevealed ? `; ${L.unrevealed} not revealed on Humble yet` : ""}.`;
   $("#humble-scan-note").hidden = !scanNote; $("#humble-scan-note").textContent = scanNote;
 }
 
