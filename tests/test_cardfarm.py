@@ -1754,3 +1754,8 @@ def test_humble_scan_finds_the_action_and_queues_keys_for_games_you_dont_have(wo
     f._humble_scan()                                                           # again: nothing new, no rediscovery
     assert f.humble_snapshot()["last_scan"]["queued"] == 0
     assert sum(1 for url, _ in asked if url.endswith("bb.js")) == 1
+    pages[2] = pages[1]                                                        # Humble repeating its first page
+    asked.clear()
+    f._humble_scan()
+    assert "first page" in f.humble_snapshot()["last_scan"]["error"]
+    assert sum(1 for _, a in asked if a == action) == 2                        # stopped at page 2, not page 200

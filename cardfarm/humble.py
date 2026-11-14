@@ -170,7 +170,12 @@ class Humble:
                     action = find_library_action(cookies)
                     box["library_action"], box["library_action_fresh"] = action, True
                     continue
-                items += d.get("results") or []
+                got = d.get("results") or []
+                # Humble answers this app's requests with its first page whatever page is asked for
+                # (2026-11-14) - stop at once rather than read page 1 two hundred times
+                if page > 1 and got and items and [r.get("id") for r in got] == [r.get("id") for r in items[:len(got)]]:
+                    raise ValueError("Humble only shows this app the first page of your library - the scan can't read it all yet")
+                items += got
                 pages = max(1, int((d.get("pagination") or {}).get("totalPages") or 1))
                 page += 1
                 time.sleep(PAGE_GAP)
