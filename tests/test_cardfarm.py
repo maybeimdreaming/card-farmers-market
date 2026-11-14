@@ -1704,6 +1704,28 @@ def test_humble_revealed_steam_keys_are_read():
     assert humble_mod.steam_keys(items) == [("AAAAA-AAAAA-AAAA1", "Paper Lanterns")]        # revealed, unexpired Steam keys only
 
 
+def test_humble_library_pages_are_read_through_the_page_itself(monkeypatch):
+    monkeypatch.setattr(humble_mod.time, "sleep", lambda s: None)
+    library = {n: [{"id": f"{n}-{i}"} for i in range(5)] for n in (1, 2, 3)}
+    page, kept, ran, shown = ["1"], {}, [], []
+
+    def js(code):                                                              # a fake of Humble's page
+        ran.append(code)
+        if "pushState" in code:
+            kept.clear()
+            page[0] = code.split("?page=")[1].split("'")[0]                    # its router fetches that page
+            kept[page[0]] = {"results": library[int(page[0])], "pagination": {"page": 1, "totalPages": 3}}
+            return ""
+        if code.startswith("window.__cfLib.pages["):
+            n = code.split("[")[1].split("]")[0]
+            return json.dumps(kept[n]) if n in kept else ""
+        return ""
+    items = humble_mod.read_library_pages(js, lambda p, n: shown.append((p, n)))
+    assert [it["id"] for it in items] == [f"{n}-{i}" for n in (1, 2, 3) for i in range(5)]
+    assert ran[0] == humble_mod.LIBRARY_HOOK and "?page=1" in [c for c in ran if "pushState" in c][-1]
+    assert shown[-1] == (3, 3)
+
+
 def test_humble_scan_reads_the_library_and_queues_keys_for_games_you_dont_have(world, monkeypatch):
     f = world["make"]()
     f._humble_box = {"cookies": {"session": "x"}}

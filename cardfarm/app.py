@@ -8,15 +8,17 @@ import json
 import os
 import pkgutil
 import threading
+import time
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("WebKit", "6.0")
-from gi.repository import Adw, Gio, GLib, Gtk, WebKit  # noqa: E402
+gi.require_version("Soup", "3.0")
+from gi.repository import Adw, Gio, GLib, Gtk, Soup, WebKit  # noqa: E402
 
-from . import api  # noqa: E402
+from . import api, humble  # noqa: E402
 
 APP_ID = "io.github.cardfarm.CardFarm"  # kept from the Card Farm days: the menu entry, icon and settings use it
 NAME = "Card Farmer's Market"
@@ -40,7 +42,9 @@ class CardFarmApp(Adw.Application):
         self.farm.notify = lambda title, body: GLib.idle_add(self._notify, title, body)
         self.farm.on_quit = lambda: GLib.idle_add(self.quit)
         self.farm.open_humble = lambda url, check: GLib.idle_add(self._sign_in_window, url, check)
+        self.farm.read_humble_library = self._read_library
         threading.Thread(target=self.farm.run, daemon=True).start()
+        GLib.timeout_add_seconds(2, self._scan_flag)
         WebKit.WebContext.get_default().register_uri_scheme("cardfarm", self._answer)
         for name, accels, act in (("quit", ["<Control>q"], self.quit),
                                   ("reload", ["<Control>r"], lambda: self.view and self.view.reload())):
@@ -172,6 +176,85 @@ class CardFarmApp(Adw.Application):
             return True
         GLib.timeout_add_seconds(2, poll)
         return False
+
+    def _read_library(self, url, progress):
+        """Every item of the Humble library, read by Humble's own library page in a window of its
+        own, minimised, holding the saved Humble sign-in (the farm's thread waits here; the
+        window's work happens on GTK's). humble.read_library_pages drives the page."""
+        box, loaded = {}, threading.Event()
+
+        def on_main(fn):
+            """Run fn on GTK's thread and wait for what it hands to done(value)."""
+            out, ready = {}, threading.Event()
+            GLib.idle_add(lambda: (fn(lambda v=None, e=None: (out.update(v=v, e=e), ready.set())), False)[1])
+            if not ready.wait(30):
+                raise ValueError("Humble's window stopped answering")
+            if out.get("e"):
+                raise ValueError(out["e"])
+            return out.get("v")
+
+        def open_window(done):
+            session = WebKit.NetworkSession.new_ephemeral()
+            view = WebKit.WebView(network_session=session)
+            win = Gtk.Window(title="Reading your Humble library", default_width=760, default_height=720)
+            win.set_child(view)
+            win.connect("close-request", lambda *a: box.update(closed=True) or False)
+            view.connect("load-changed", lambda v, event: event == WebKit.LoadEvent.FINISHED and loaded.set())
+            box.update(win=win, view=view)
+            cookies = list((self.farm._humble().get("cookies") or {}).items())
+            pending = [len(cookies)]
+
+            def added(manager, result):
+                manager.add_cookie_finish(result)
+                pending[0] -= 1
+                if not pending[0]:
+                    view.load_uri(url)
+                    win.present()
+                    win.minimize()
+                    done()
+            for name, value in cookies:
+                c = Soup.Cookie.new(name, value, "www.humblebundle.com", "/", -1)
+                c.set_secure(True)
+                session.get_cookie_manager().add_cookie(c, None, added)
+            if not cookies:
+                done(e="not signed in to Humble")
+
+        def js(code):
+            if box.get("closed"):
+                raise ValueError("the Humble window was closed")
+
+            def run(done):
+                def got(view, result):
+                    try:
+                        v = view.evaluate_javascript_finish(result)
+                        done("" if v is None or v.is_undefined() or v.is_null() else v.to_string())
+                    except GLib.Error as e:
+                        done(e=e.message)
+                box["view"].evaluate_javascript(code, -1, None, None, None, got)
+            return on_main(run)
+
+        try:
+            on_main(open_window)
+            if not loaded.wait(60):
+                raise ValueError("Humble's library page didn't load")
+            time.sleep(2)
+            if not (js("location.href") or "").startswith(url):
+                raise ValueError("Humble signed this app out - sign in to Humble again")
+            return humble.read_library_pages(js, progress)
+        finally:
+            if box.get("win"):
+                GLib.idle_add(box["win"].destroy)
+
+    def _scan_flag(self):
+        """`touch humble-scan` in the data folder: scan the Humble library (from outside the window)."""
+        flag = os.path.join(self.farm.data, "humble-scan")
+        if os.path.exists(flag):
+            try:
+                os.remove(flag)
+                self.farm.humble_scan()
+            except Exception as e:
+                self.farm.log(f"Couldn't start the Humble scan: {e}", "warn")
+        return True
 
     def _hold(self):
         if not self.held:

@@ -20,6 +20,60 @@ EDITION = re.compile(r"\b(game of the year|goty|definitive|complete|deluxe|enhan
                      r"|remastered|director'?s cut|special|standard|collector'?s|premium|legendary|steam)\b( edition)?|\bedition\b")
 
 
+# Put into Humble's library page: keeps every answer the page gets from its library action
+# (React's line format: the line holding {results, pagination}), by the page number in the
+# address at the time - the answer's own page field always says 1.
+LIBRARY_HOOK = r"""
+(function () {
+  if (window.__cfLib) return;
+  window.__cfLib = {pages: {}};
+  var plain = window.fetch;
+  window.fetch = function (input, init) {
+    var asked = new URLSearchParams(location.search).get("page") || "1";
+    var headers = (init && init.headers) || {};
+    var action = headers["Next-Action"] || headers["next-action"] || (headers.get && headers.get("Next-Action"));
+    return plain.apply(this, arguments).then(function (r) {
+      if (action) r.clone().text().then(function (t) {
+        var line = t.split("\n").find(function (l) { return /^[0-9a-f]+:\{.*"results"/.test(l); });
+        if (line) window.__cfLib.pages[asked] = JSON.parse(line.slice(line.indexOf(":") + 1));
+      }).catch(function () {});
+      return r;
+    });
+  };
+})();
+"""
+
+
+def read_library_pages(js, progress, gap=1, page_wait=45):
+    """Every library item, from Humble's library page in a window of the app. js(code) runs code
+    in that page and returns its value as text ("" for none). The page is sent through its pages
+    the way its own links do it (?page=N, which its router follows); page 1 was fetched before the
+    hook went in, so it's asked for again last."""
+    js(LIBRARY_HOOK)
+
+    def wait_for(page):
+        end = time.time() + page_wait
+        while time.time() < end:
+            got = js(f"window.__cfLib.pages[{page}] ? JSON.stringify(window.__cfLib.pages[{page}]) : ''")
+            if got:
+                return json.loads(got)
+            time.sleep(0.5)
+        raise ValueError(f"Humble's library didn't show page {page}")
+
+    pages, page, last = {}, 2, 2
+    while page <= last:
+        progress(page - 1, last)
+        js(f"window.__cfLib.pages = {{}}; history.pushState(null, '', '?page={page}'); ''")
+        pages[page] = wait_for(page)
+        last = max(1, int((pages[page].get("pagination") or {}).get("totalPages") or 1))
+        page += 1
+        time.sleep(gap)
+    js("window.__cfLib.pages = {}; history.pushState(null, '', '?page=1'); ''")
+    pages[1] = wait_for(1)
+    progress(last, last)
+    return [item for n in sorted(pages) for item in pages[n].get("results") or []]
+
+
 def steam_keys(items):
     """(key, title) for every revealed Steam key among library items."""
     out = []
