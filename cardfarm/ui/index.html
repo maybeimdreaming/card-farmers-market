@@ -710,7 +710,7 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
 
     <section id="humble-section">
       <div class="head"><h2>Humble Bundle</h2>
-        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-scan" class="go" hidden>Scan library</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
+        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-reveal" hidden>Reveal keys</button><button id="humble-scan" class="go" hidden>Scan library</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
       <p class="note" id="humble-note">Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.</p>
       <p class="note" id="humble-scan-note" hidden></p>
     </section>
@@ -1241,6 +1241,12 @@ function renderKeys(s) {
       + `${L.spare ? `, ${L.spare} spare copies kept unused` : ""}${L.dropped ? `, ${L.dropped} taken off the list` : ""}`
       + `${L.unrevealed ? `; ${L.unrevealed} not revealed on Humble yet` : ""}.`;
   $("#humble-scan-note").hidden = !scanNote; $("#humble-scan-note").textContent = scanNote;
+  // keys Humble hasn't revealed, for games you don't have: revealing is for good (no gifting after)
+  const toReveal = (L && L.to_reveal) || [], revealing = s.busy.includes("humble-reveal");
+  $("#humble-reveal").hidden = !h.signed_in || (!toReveal.length && !revealing);
+  $("#humble-reveal").disabled = revealing || scanning;
+  $("#humble-reveal").textContent = revealing ? (s.progress["humble-reveal"] || "Revealing…")
+    : `Reveal ${toReveal.length} key${toReveal.length === 1 ? "" : "s"}`;
 }
 
 function renderTape(history) {
@@ -1463,6 +1469,12 @@ $("#keys-go").onclick = async () => { const r = await post("/api/keys/add", {tex
 $("#keys-clear").onclick = () => post("/api/keys/clear", {which: "done"});
 $("#humble-in").onclick = () => post("/api/humble/sign-in");
 $("#humble-scan").onclick = () => post("/api/humble/scan");
+$("#humble-reveal").onclick = () => {
+  const list = (state?.humble?.last_scan?.to_reveal || []).map(r => "• " + r.title).join("\n");
+  confirm(`Reveal these Steam keys on Humble and add them to the list above?\n\n${list}\n\n`
+    + "Revealing can't be undone: a revealed key can't be gifted any more. Only games you don't have are listed.")
+    && post("/api/humble/reveal");
+};
 $("#humble-out").onclick = () => confirm("Sign out of Humble Bundle in this app?") && post("/api/humble/sign-out");
 $("#sales-export").onclick = async () => { const r = await post("/api/sales/export"); if (r.path) alert(`Saved to ${r.path}`); };
 $("#alert-find").onsubmit = e => { e.preventDefault(); const text = $("#alert-text").value.trim();

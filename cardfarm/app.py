@@ -42,7 +42,7 @@ class CardFarmApp(Adw.Application):
         self.farm.notify = lambda title, body: GLib.idle_add(self._notify, title, body)
         self.farm.on_quit = lambda: GLib.idle_add(self.quit)
         self.farm.open_humble = lambda url, check: GLib.idle_add(self._sign_in_window, url, check)
-        self.farm.read_humble_library = self._read_library
+        self.farm.humble_page = self._humble_page
         threading.Thread(target=self.farm.run, daemon=True).start()
         GLib.timeout_add_seconds(2, self._scan_flag)
         WebKit.WebContext.get_default().register_uri_scheme("cardfarm", self._answer)
@@ -177,10 +177,10 @@ class CardFarmApp(Adw.Application):
         GLib.timeout_add_seconds(2, poll)
         return False
 
-    def _read_library(self, url, progress):
-        """Every item of the Humble library, read by Humble's own library page in a window of its
-        own, minimised, holding the saved Humble sign-in (the farm's thread waits here; the
-        window's work happens on GTK's). humble.read_library_pages drives the page."""
+    def _humble_page(self, url, work):
+        """A page of Humble's (the library, an item) in a window of its own, minimised, holding the
+        saved Humble sign-in; returns work(js), js(code) running code in that page and returning
+        its value as text. The farm's thread waits here; the window's work happens on GTK's."""
         box, loaded = {}, threading.Event()
 
         def on_main(fn):
@@ -196,7 +196,7 @@ class CardFarmApp(Adw.Application):
         def open_window(done):
             session = WebKit.NetworkSession.new_ephemeral()
             view = WebKit.WebView(network_session=session)
-            win = Gtk.Window(title="Reading your Humble library", default_width=760, default_height=720)
+            win = Gtk.Window(title="Humble Bundle (Card Farmer's Market)", default_width=760, default_height=720)
             win.set_child(view)
             win.connect("close-request", lambda *a: box.update(closed=True) or False)
             view.connect("load-changed", lambda v, event: event == WebKit.LoadEvent.FINISHED and loaded.set())
@@ -238,9 +238,9 @@ class CardFarmApp(Adw.Application):
             if not loaded.wait(60):
                 raise ValueError("Humble's library page didn't load")
             time.sleep(2)
-            if not (js("location.href") or "").startswith(url):
+            if not (js("location.href") or "").startswith(humble.SITE + "/home/library"):
                 raise ValueError("Humble signed this app out - sign in to Humble again")
-            return humble.read_library_pages(js, progress)
+            return work(js)
         finally:
             if box.get("win"):
                 GLib.idle_add(box["win"].destroy)

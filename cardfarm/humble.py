@@ -100,6 +100,17 @@ def _plain(name):
     return re.sub(r"\b(" + "|".join(ROMAN) + r")\b", lambda m: ROMAN[m.group(1)], s)
 
 
+def steam_unrevealed(items):
+    """(item id for its page, title) for every unrevealed, unexpired Steam key among library items."""
+    out = []
+    for it in items:
+        for k in ((it.get("entitlements") or {}).get("keys")) or []:
+            if (k.get("keyIntegrationId") == "steam" and not (k.get("redemptionData") or {}).get("keyFormatted")
+                    and not k.get("expired") and k.get("redeemable") is not False and it.get("productEntitlementId")):
+                out.append((it["productEntitlementId"], k.get("title") or it.get("title") or ""))
+    return out
+
+
 def title_key(name):
     """A game name as compared across Humble and Steam: no ™/®, region tags, edition words, leading
     "The"/"A", roman numerals, punctuation or case."""
@@ -163,7 +174,7 @@ def signed_in_as(cookies):
 
 class Humble:
     open_humble = None  # set by the window: opens Humble's sign-in, calls back with its cookies
-    read_humble_library = None  # set by the window: (url, progress) -> every library item
+    humble_page = None  # set by the window: (url, fn) -> fn(js) run in that Humble page, js(code) -> text
 
     def _humble(self):
         if getattr(self, "_humble_box", None) is None:
@@ -207,19 +218,19 @@ class Humble:
         try:
             if not signed_in_as(box["cookies"]):
                 raise ValueError("Humble signed this app out - sign in to Humble again")
-            if not self.read_humble_library:
+            if not self.humble_page:
                 raise ValueError("the scan needs the app's window (Humble's own library page does the reading)")
 
             def progress(page, pages):
                 self.progress["humble"] = f"Reading your Humble library: page {page} of {pages}"
             self.progress["humble"] = "Opening your Humble library"
-            items = self.read_humble_library(LIBRARY, progress)
+            items = self.humble_page(LIBRARY, lambda js: read_library_pages(js, progress))
             ids = [it.get("id") for it in items]
             if len(set(ids)) < len(ids) * 0.9:
                 raise ValueError("Humble showed the same items on every page - the scan can't read the library")
             keys = steam_keys(items)
             self.progress["humble"] = "Checking which of its games you have on Steam"
-            result = self._sort_humble_keys(keys)
+            result = self._sort_humble_keys(keys, steam_unrevealed(items))
             result.update(at=time.time(), items=len(items), steam_keys=len(keys), unrevealed=sum(
                 1 for it in items for k in ((it.get("entitlements") or {}).get("keys")) or []
                 if k.get("keyIntegrationId") == "steam" and not (k.get("redemptionData") or {}).get("keyFormatted")
@@ -229,7 +240,8 @@ class Humble:
             self.log(f"Humble library: {len(keys)} revealed Steam keys for {result['titles']} titles; {result['owned']} titles "
                      f"you have, {result['queued']} keys new to redeem, {result['spare']} spare copies kept"
                      + (f", {result['dropped']} taken off the list" if result["dropped"] else "")
-                     + (f"; {result['unrevealed']} not revealed yet" if result["unrevealed"] else ""))
+                     + (f"; {result['unrevealed']} not revealed yet, {len(result['to_reveal'])} worth revealing"
+                        if result["unrevealed"] else ""))
         except Exception as e:
             box["last_scan"] = {"at": time.time(), "error": str(e)}
             self.log(f"Couldn't read your Humble library: {e}", "warn")
@@ -258,11 +270,12 @@ class Humble:
             hit = cache[k] = {"appid": appid, "at": time.time()}
         return None if hit["appid"] is None else hit["appid"] in owned_ids
 
-    def _sort_humble_keys(self, keys):
+    def _sort_humble_keys(self, keys, unrevealed=()):
         """Which revealed Steam keys go to the Keys list. Grouped by title: an owned title (by name,
         else by app id) sends none and takes its waiting ones off the list; otherwise one key per
         title waits at a time - its copies are kept unused (giftable) unless Steam answers that one
-        is used or invalid, when the next copy gets its turn."""
+        is used or invalid, when the next copy gets its turn. Unrevealed keys worth revealing: one
+        per title you don't have and hold no revealed copy of (the rest stay giftable)."""
         names = OwnedNames(steam.owned_names(self.session).values())
         try:
             owned_ids = steam.owned_apps(self.session)
@@ -297,12 +310,98 @@ class Humble:
                 spare += len(untried) - 1
             else:
                 done += 1                                              # every copy tried: Steam said no to each
+        reveal, seen = [], set(groups)
+        for item_id, title in unrevealed:
+            k = title_key(title) or item_id
+            if k in seen or names.owns(title) or (owned_ids is not None and self.resolve_title(title, owned_ids)):
+                continue
+            seen.add(k)
+            reveal.append({"id": item_id, "title": title})
         dropped = self.drop_waiting(drop, "humble")
         return {"titles": len(groups), "owned": owned, "queued": self.queue_keys(todo, "humble"), "spare": spare,
-                "dropped": dropped, "exhausted": done}
+                "dropped": dropped, "exhausted": done, "to_reveal": reveal}
+
+    def humble_reveal(self):
+        if not (self._humble().get("last_scan") or {}).get("to_reveal"):
+            raise ValueError("nothing to reveal - scan the library first")
+        self._in_background("humble-reveal", self._humble_reveal)
+        return {"started": True}
+
+    def _humble_reveal(self):
+        """Reveal the keys the last scan picked, one item page at a time, pressing its Reveal button
+        like a person would, and queue each key it shows. Irreversible on Humble's side: a revealed
+        key can't be gifted any more - which is why only those for games you don't have are picked."""
+        box = self._humble()
+        scan = box.get("last_scan") or {}
+        done = 0
+        try:
+            while scan.get("to_reveal"):
+                item = scan["to_reveal"][0]
+                self.progress["humble-reveal"] = f"Revealing {item['title']} ({done + 1} of {done + len(scan['to_reveal'])})"
+                key = self.humble_page(f"{SITE}/home/library/{item['id']}", reveal_in_page)
+                self.queue_keys([(key, item["title"])], "humble")
+                self.log(f"Revealed the Steam key for {item['title']} on Humble", "sell")
+                scan["to_reveal"].pop(0)
+                done += 1
+                files.write_json(self._path("humble.json"), box, private=True)
+                time.sleep(2)
+        except Exception as e:
+            self.log(f"Couldn't reveal {item['title']} on Humble: {e}", "warn")
+        finally:
+            self.progress.pop("humble-reveal", None)
 
     def humble_snapshot(self):
         box = self._humble()
         who = box.get("who") or {}
         name = next((who[k] for k in ("email", "name", "username") if isinstance(who.get(k), str)), None)
         return {"signed_in": bool(box.get("cookies")), "who": name, "at": box.get("at", 0), "last_scan": box.get("last_scan")}
+
+
+# Pressing an item page's Reveal button (and the "are you sure" one, if Humble asks) and reading the
+# key off the page. Text, not Humble's internals: the item page's code isn't on the library page.
+REVEAL_PRESS = r"""
+(function () {
+  var b = Array.from(document.querySelectorAll("button, a")).find(function (e) {
+    return /^\s*reveal( key)?\s*$/i.test(e.innerText || "") && !e.disabled; });
+  if (!b) return "none";
+  b.click();
+  return "pressed";
+})()
+"""
+REVEAL_LOOK = r"""
+(function () {
+  var text = (document.body.innerText || "") + " " + Array.from(document.querySelectorAll("input, textarea"))
+    .map(function (i) { return i.value || ""; }).join(" ");
+  var keys = text.toUpperCase().match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}(?:-[A-Z0-9]{5}-[A-Z0-9]{5})?/g) || [];
+  var dialog = document.querySelector("[role=alertdialog], [role=dialog]"), pressed = "";
+  if (dialog) {
+    var b = Array.from(dialog.querySelectorAll("button")).find(function (e) {
+      return /^\s*(reveal|confirm|continue|yes|ok)\b/i.test(e.innerText || "") && !e.disabled && !e.dataset.cfPressed; });
+    if (b) { b.dataset.cfPressed = "1"; b.click(); pressed = b.innerText.trim(); }
+  }
+  return JSON.stringify({keys: keys, pressed: pressed});
+})()
+"""
+
+
+def reveal_in_page(js, wait=25):
+    """In an item's page: press Reveal (once it has drawn), confirm if asked, and return the key it
+    then shows. A key already on the page is returned as it is."""
+    end = time.time() + wait
+    while True:
+        look = json.loads(js(REVEAL_LOOK) or "{}")
+        if look.get("keys"):
+            return look["keys"][0]
+        state = js(REVEAL_PRESS)
+        if state == "pressed":
+            break
+        if time.time() > end:
+            raise ValueError("the item's page shows no Reveal button")
+        time.sleep(1)
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(1)
+        look = json.loads(js(REVEAL_LOOK) or "{}")
+        if look.get("keys"):
+            return look["keys"][0]
+    raise ValueError("Humble didn't show the key after Reveal")

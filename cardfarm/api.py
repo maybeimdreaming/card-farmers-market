@@ -115,6 +115,8 @@ def route(farm, path, body):
         return farm.humble_sign_out()
     if path == "/api/humble/scan":
         return farm.humble_scan()
+    if path == "/api/humble/reveal":
+        return farm.humble_reveal()
     if path == "/api/update":
         return farm.install_update()
     if path == "/api/refresh":

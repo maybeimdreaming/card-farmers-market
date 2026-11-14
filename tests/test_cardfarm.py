@@ -1685,7 +1685,8 @@ def test_humble_sign_in_is_kept_once_humble_says_so(world, monkeypatch, tmp_path
 
 def humble_item(title, key=None, kind="steam", expired=False):
     """A library item the way Humble's filterUserLibrary returns it (2026-11-14, trimmed)."""
-    return {"id": f"{title}/{key}", "title": title, "itemType": "content-entitlement", "entitlements": {"downloads": [], "keys": [
+    return {"id": f"{title}/{key}", "productEntitlementId": f"pe-{title}-{key}", "title": title, "itemType": "content-entitlement",
+            "entitlements": {"downloads": [], "keys": [
         {"title": title, "keyIntegrationId": kind, "expired": expired, "redeemedAt": "2026-01-01T00:00:00Z" if key else None,
          "redemptionData": {"keyFormatted": key, "externalOrderStatus": None, "externalAccountName": None}}]}}
 
@@ -1752,7 +1753,7 @@ def test_humble_scan_reads_the_library_and_queues_keys_for_games_you_dont_have(w
                humble_item("Paper Lanterns - Lamp Pack", "AAAAA-AAAAA-AAAA6"),    # DLC not owned
                humble_item("Not Yet")]
     reads, searched = [], []
-    f.read_humble_library = lambda url, progress: reads.append(url) or progress(1, 1) or library
+    f.humble_page = lambda url, work: reads.append(url) or library
     monkeypatch.setattr(steam, "owned_names", lambda s: {1: "Paper Lanterns", 2: "Elsewhere"})
     monkeypatch.setattr(steam, "owned_apps", lambda s: {1, 2, 501})
     store = {"Paper Lanterns - Moth Pack": [(501, "Paper Lanterns - Moth Pack")], "Paper Lanterns - Lamp Pack": [(502, "Paper Lanterns: Lamp Pack")]}
@@ -1777,6 +1778,58 @@ def test_humble_scan_reads_the_library_and_queues_keys_for_games_you_dont_have(w
     assert scan["queued"] == 1 and scan["dropped"] == 1
     waiting = {k["key"] for k in f._keys()["list"] if k["status"] == "waiting"}
     assert waiting == {"AAAAA-AAAAA-AAAA4", "AAAAA-AAAAA-AAAA6", "AAAAA-AAAAA-AAAA9"}  # the pasted key stays put
-    f.read_humble_library = lambda url, progress: library[:1] * 5             # the same item on every page
+    f.humble_page = lambda url, work: library[:1] * 5             # the same item on every page
     f._humble_scan()
     assert "same items" in f.humble_snapshot()["last_scan"]["error"]
+
+
+def test_humble_reveal_picks_only_keys_worth_revealing(world, monkeypatch):
+    f = world["make"]()
+    f._humble_box = {"cookies": {"session": "x"}}
+    monkeypatch.setattr(humble_mod, "STORE_GAP", 0)
+    monkeypatch.setattr(steam, "owned_names", lambda s: {1: "Paper Lanterns"})
+    monkeypatch.setattr(steam, "owned_apps", lambda s: {1})
+    monkeypatch.setattr(steam, "store_search", lambda term: [])
+    items = [humble_item("Paper Lanterns"),                                    # owned: stays giftable
+             humble_item("Brand New", "AAAAA-AAAAA-AAAA2"), humble_item("Brand New"),   # a revealed copy already
+             humble_item("Fresh Game"), humble_item("Fresh Game"),             # two unrevealed copies: one
+             humble_item("Gone Game", expired=True)]
+    result = f._sort_humble_keys(humble_mod.steam_keys(items), humble_mod.steam_unrevealed(items))
+    assert [r["title"] for r in result["to_reveal"]] == ["Fresh Game"]
+    assert result["to_reveal"][0]["id"] == "pe-Fresh Game-None"
+
+
+def test_humble_reveal_presses_reveal_and_queues_the_key(world, monkeypatch):
+    monkeypatch.setattr(humble_mod.time, "sleep", lambda s: None)
+    page = {"drawn": 0, "pressed": False, "confirmed": False}
+
+    def js(code):                                                              # an item page that asks "are you sure"
+        if code == humble_mod.REVEAL_PRESS:
+            page["drawn"] += 1
+            if page["drawn"] < 3:
+                return "none"                                                  # still drawing
+            page["pressed"] = True
+            return "pressed"
+        if code == humble_mod.REVEAL_LOOK:
+            if page["pressed"] and not page["confirmed"]:
+                page["confirmed"] = True
+                return json.dumps({"keys": [], "pressed": "Reveal Key"})
+            return json.dumps({"keys": ["BBBBB-BBBBB-BBBB1"] if page["confirmed"] else [], "pressed": ""})
+    assert humble_mod.reveal_in_page(js) == "BBBBB-BBBBB-BBBB1" and page["confirmed"]
+    with pytest.raises(ValueError):
+        humble_mod.reveal_in_page(lambda code: "none" if code == humble_mod.REVEAL_PRESS else '{"keys": []}', wait=0)
+
+    f = world["make"]()
+    monkeypatch.setattr(keys_mod, "GAP", 0)
+    f._humble_box = {"cookies": {"session": "x"}, "last_scan": {"to_reveal": [{"id": "pe-1", "title": "Fresh Game"},
+                                                                            {"id": "pe-2", "title": "Broken Page"}]}}
+    with pytest.raises(ValueError):
+        type(f).humble_reveal(type("Empty", (), {"_humble": lambda s: {}})())   # nothing picked yet
+    opened = []
+    f._keys()["paused_until"] = time.time() + 3600
+    f.humble_page = lambda url, work: opened.append(url) or (work(js) if url.endswith("pe-1") else (_ for _ in ()).throw(ValueError("no Reveal button")))
+    page.update(drawn=5, pressed=False, confirmed=True)
+    f._humble_reveal()
+    assert opened == ["https://www.humblebundle.com/home/library/pe-1", "https://www.humblebundle.com/home/library/pe-2"]
+    assert [(k["names"], k["source"]) for k in f._keys()["list"]] == [(["Fresh Game"], "humble")]
+    assert [r["title"] for r in f._humble()["last_scan"]["to_reveal"]] == ["Broken Page"]   # the failed one waits for next time

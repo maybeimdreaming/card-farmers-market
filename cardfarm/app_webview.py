@@ -44,7 +44,7 @@ class WebviewApp:
         self.farm = self.make_farm()
         self.farm.on_quit = self.quit
         self.farm.open_humble = lambda url, check: threading.Thread(target=self._sign_in_window, args=(url, check), daemon=True).start()
-        self.farm.read_humble_library = self._read_library
+        self.farm.humble_page = self._humble_page
         threading.Thread(target=self.farm.run, daemon=True).start()
         # a file:// address: pywebview starts its built-in web server only for bare paths
         page = pathlib.Path(HERE, "ui", "index.html").as_uri()
@@ -84,10 +84,10 @@ class WebviewApp:
         finally:
             self._signing_in = None
 
-    def _read_library(self, url, progress):
-        """Every item of the Humble library, read by Humble's own library page in a window of its
-        own (the farm's thread waits here); humble.read_library_pages drives it."""
-        win = webview.create_window("Reading your Humble library", url, width=760, height=720, minimized=True)
+    def _humble_page(self, url, work):
+        """A page of Humble's (the library, an item) in a window of its own; returns work(js), js(code)
+        running code in that page and returning its value as text (the farm's thread waits here)."""
+        win = webview.create_window("Humble Bundle (Card Farmer's Market)", url, width=760, height=720, minimized=True)
         loaded, closed = threading.Event(), []
         win.events.loaded += loaded.set
         win.events.closed += lambda: closed.append(True)
@@ -101,9 +101,9 @@ class WebviewApp:
             if not loaded.wait(60):
                 raise ValueError("Humble's library page didn't load")
             time.sleep(2)
-            if not (js("location.href") or "").startswith(url):
+            if not (js("location.href") or "").startswith(humble.SITE + "/home/library"):
                 raise ValueError("Humble signed this app out - sign in to Humble again")
-            return humble.read_library_pages(lambda code: js(code) or "", progress)
+            return work(js)
         finally:
             try:
                 win.destroy()
