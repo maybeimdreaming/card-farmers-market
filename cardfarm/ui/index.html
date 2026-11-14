@@ -710,8 +710,9 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
 
     <section id="humble-section">
       <div class="head"><h2>Humble Bundle</h2>
-        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
+        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-scan" class="go" hidden>Scan library</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
       <p class="note" id="humble-note">Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.</p>
+      <p class="note" id="humble-scan-note" hidden></p>
     </section>
     </div>
 
@@ -1228,6 +1229,16 @@ function renderKeys(s) {
   $("#humble-in").hidden = h.signed_in; $("#humble-out").hidden = !h.signed_in;
   $("#humble-note").textContent = h.signed_in ? `Signed in to Humble${h.who ? " as " + h.who : ""}.`
     : "Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.";
+  // the library scan: its revealed Steam keys go to the list above, minus games you have
+  const scanning = s.busy.includes("humble"), L = h.last_scan;
+  $("#humble-scan").hidden = !h.signed_in; $("#humble-scan").disabled = scanning;
+  $("#humble-scan").textContent = scanning ? "Scanning…" : "Scan library";
+  const scanNote = scanning ? (s.progress.humble || "Reading your Humble library…")
+    : !L ? (h.signed_in ? "Scan library reads your Humble library and adds every revealed Steam key for a game you don't have yet to the list above." : "")
+    : L.error ? `Last scan didn't finish: ${L.error}`
+    : `Last scan ${ago(L.at)}${ago(L.at) === "just now" ? "" : " ago"}: ${L.steam_keys} Steam keys, ${L.owned} for games you have,`
+      + ` ${L.queued} added to the list${L.listed_before ? `, ${L.listed_before} on it already` : ""}.`;
+  $("#humble-scan-note").hidden = !scanNote; $("#humble-scan-note").textContent = scanNote;
 }
 
 function renderTape(history) {
@@ -1449,6 +1460,7 @@ $("#keys-text").oninput = () => state && renderKeys(state);
 $("#keys-go").onclick = async () => { const r = await post("/api/keys/add", {text: $("#keys-text").value}); if (r.added) $("#keys-text").value = ""; };
 $("#keys-clear").onclick = () => post("/api/keys/clear", {which: "done"});
 $("#humble-in").onclick = () => post("/api/humble/sign-in");
+$("#humble-scan").onclick = () => post("/api/humble/scan");
 $("#humble-out").onclick = () => confirm("Sign out of Humble Bundle in this app?") && post("/api/humble/sign-out");
 $("#sales-export").onclick = async () => { const r = await post("/api/sales/export"); if (r.path) alert(`Saved to ${r.path}`); };
 $("#alert-find").onsubmit = e => { e.preventDefault(); const text = $("#alert-text").value.trim();

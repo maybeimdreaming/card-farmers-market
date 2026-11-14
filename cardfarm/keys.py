@@ -44,17 +44,30 @@ class KeyRedeemer:
 
     def add_keys(self, text, source="pasted"):
         """Queue every key found in `text` that isn't on the list yet; returns how many were new."""
+        n = self.queue_keys([(k, None) for k in find_keys(text)], source)
+        if not n:
+            raise ValueError("no new Steam keys in that text (they look like XXXXX-XXXXX-XXXXX)")
+        return {"added": n}
+
+    def queue_keys(self, pairs, source):
+        """Queue (key, name or None) pairs not on the list yet - the name shows until Steam names the
+        key itself. Returns how many were new (0 is fine: everything was queued before)."""
         box = self._keys()
         with self.lock:
             have = {k["key"] for k in box["list"]}
-            new = [k for k in find_keys(text) if k not in have]
-            box["list"] += [{"key": k, "id": _id(k), "status": "waiting", "names": [], "at": 0, "source": source} for k in new]
-        if not new:
-            raise ValueError("no new Steam keys in that text (they look like XXXXX-XXXXX-XXXXX)")
-        self._save_keys()
-        self.log(f"{len(new)} Steam key{'s' * (len(new) > 1)} to redeem")
-        self._redeem_soon()
-        return {"added": len(new)}
+            new, seen = [], set()
+            for key, name in pairs:
+                key = (key or "").strip().upper()
+                if KEY.fullmatch(key) and key not in have and key not in seen:
+                    seen.add(key)
+                    new.append({"key": key, "id": _id(key), "status": "waiting", "names": [name] if name else [],
+                                "at": 0, "source": source})
+            box["list"] += new
+        if new:
+            self._save_keys()
+            self.log(f"{len(new)} Steam key{'s' * (len(new) > 1)} to redeem")
+            self._redeem_soon()
+        return len(new)
 
     def _redeem_soon(self):
         self._in_background("keys", self._redeem_keys)
@@ -82,7 +95,8 @@ class KeyRedeemer:
                 if status == "limit":
                     box["paused_until"] = time.time() + LIMIT_WAIT
                 else:
-                    k.update(status=status, names=r["names"], at=time.time(), code=r["code"])
+                    # Steam names what it added or you own; otherwise keep what the key came with (Humble's title)
+                    k.update(status=status, names=r["names"] or k.get("names") or [], at=time.time(), code=r["code"])
             self._save_keys()
             if status == "limit":
                 self.log("Steam says too many keys were tried for now; the rest are redeemed in an hour", "warn")

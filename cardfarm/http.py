@@ -65,8 +65,9 @@ def _quoted(text):
     return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def request(url, data=None, cookies=None, headers=None, timeout=30, ua=UA):
-    """Returns (status, body text). data (a dict) makes it a form POST.
+def request(url, data=None, cookies=None, headers=None, timeout=30, ua=UA, raw=None):
+    """Returns (status, body text). data (a dict) makes it a form POST; raw (a str) is sent as the
+    body exactly as given - say a multipart form, with its Content-Type in headers.
 
     Cookies, headers and the form go to curl as a config on stdin, never on its command line,
     which any program on the PC can read. While Steam has asked that site to slow down, this
@@ -80,6 +81,9 @@ def request(url, data=None, cookies=None, headers=None, timeout=30, ua=UA):
         config.append(f"header = {_quoted(f'{k}: {v}')}")
     if data is not None:
         config.append(f"data-binary = {_quoted(urllib.parse.urlencode(data))}")
+    elif raw is not None:
+        # curl's config reads \r and \n inside quotes as line breaks: a multipart body needs them
+        config.append(f"data-binary = {_quoted(raw).replace(chr(13), chr(92) + 'r').replace(chr(10), chr(92) + 'n')}")
     # -c: keep cookies Steam sets on the way (the inventory page redirects through a cookie check)
     cmd = ["curl", "-s", "-L", "--compressed", "-c", os.devnull, "--max-time", str(timeout), *(["-A", ua] if ua else []), "-w", "\n%{http_code}", "-K", "-"]
     out = subprocess.run(cmd, input="\n".join(config).encode() + b"\n",
