@@ -1685,17 +1685,28 @@ def test_humble_sign_in_is_kept_once_humble_says_so(world, monkeypatch, tmp_path
 
 def humble_item(title, key=None, kind="steam", expired=False):
     """A library item the way Humble's filterUserLibrary returns it (2026-11-14, trimmed)."""
-    return {"id": title, "title": title, "itemType": "content-entitlement", "entitlements": {"downloads": [], "keys": [
+    return {"id": f"{title}/{key}", "title": title, "itemType": "content-entitlement", "entitlements": {"downloads": [], "keys": [
         {"title": title, "keyIntegrationId": kind, "expired": expired, "redeemedAt": "2026-01-01T00:00:00Z" if key else None,
          "redemptionData": {"keyFormatted": key, "externalOrderStatus": None, "externalAccountName": None}}]}}
 
 
 def test_humble_titles_match_steam_names_only_when_sure():
-    mine = {humble_mod.title_key(n) for n in ("Paper Lanterns", "Tidewater™: Game of the Year Edition", "Hollow & Bright")}
-    assert humble_mod.owned("Paper Lanterns", mine) and humble_mod.owned("PAPER LANTERNS®", mine)
-    assert humble_mod.owned("Tidewater GOTY", mine) and humble_mod.owned("Tidewater", mine)    # edition words don't count
-    assert humble_mod.owned("Hollow and Bright", mine)
-    assert not humble_mod.owned("Paper Lanterns 2", mine) and not humble_mod.owned("", mine)  # unsure: queued
+    names = humble_mod.OwnedNames(["OCTOPATH TRAVELER II", "A Plague Tale: Requiem", "Disco Elysium", "Nioh 2 – The Complete Edition",
+                                   "LEGO® 2K Drive", "Legacy of Kain™ Soul Reaver 1&2 Remastered", "Stray Gods: The Roleplaying Musical",
+                                   "Shadow Gambit: The Cursed Crew", "The Legend of Tianding", "Wizard of Legend", "Just Cause",
+                                   "Kane & Lynch: Dead Men", "DARK SOULS™ III", "Tomb Raider: Legend", "Tomb Raider: Anniversary"])
+    for title in ("Octopath Traveler 2", "Plague Tale: Requiem", "Disco Elysium - The Final Cut", "Nioh 2: The Complete Collection",
+                  "LEGO 2K Drive Awesome Edition", "Legacy of Kain™ Soul Reaver 1-2 Remastered ROW (ROW)", "Stray Gods",
+                  "(NEW 2025) Shadow Gambit: The Cursed Crew (ROW)", "Legend of Tianding", "Sir Whoopass(tm)" * 0 + "Wizard of Legend"):
+        assert names.owns(title), title
+    for title in ("Wizard of Legend 2", "Just Cause Collection", "Kane & Lynch Collection", "DARK SOULS™ III - Ashes of Ariandel™",
+                  "Tomb Raider", "Midnight Suns - Doctor Strange Defenders Skin", ""):
+        assert not names.owns(title), title                                    # a sequel, more games, DLC, unsure: by app id or queued
+    hits = [(1, "Dead Cells"), (1204130, "Dead Cells: The Bad Seed")]
+    assert humble_mod.store_match("Dead Cells: The Bad Seed (ROW)", hits) == 1204130
+    assert humble_mod.store_match("Dead Cells: Return to Castlevania", hits) is None
+    assert humble_mod.store_match("Witcher Tales Thronebreaker", [(973760, "Thronebreaker: The Witcher Tales")]) == 973760
+    assert humble_mod.store_match("Wizard of Legend 2", [(1, "Wizard of Legend")]) is None
 
 
 def test_humble_revealed_steam_keys_are_read():
@@ -1730,30 +1741,42 @@ def test_humble_scan_reads_the_library_and_queues_keys_for_games_you_dont_have(w
     f = world["make"]()
     f._humble_box = {"cookies": {"session": "x"}}
     monkeypatch.setattr(keys_mod, "GAP", 0)
+    monkeypatch.setattr(humble_mod, "STORE_GAP", 0)
     monkeypatch.setattr(humble_mod.http, "request", lambda u, cookies=None, **kw: (200, '{"status": "active"}'))
     f._humble_scan()                                                           # no window to read it in
     assert "window" in f.humble_snapshot()["last_scan"]["error"]
-    library = [humble_item("Paper Lanterns", "AAAAA-AAAAA-AAAA1"), humble_item("Brand New", "AAAAA-AAAAA-AAAA2"),
+    library = [humble_item("Paper Lanterns", "AAAAA-AAAAA-AAAA1"),            # owned, by name
+               humble_item("Brand New", "AAAAA-AAAAA-AAAA2"), humble_item("Brand New", "AAAAA-AAAAA-AAAA4"),  # two copies
                humble_item("One Month of IGN Plus", kind="generic"), humble_item("Also New", "AAAAA-AAAAA-AAAA3"),
+               humble_item("Paper Lanterns - Moth Pack", "AAAAA-AAAAA-AAAA5"),    # owned DLC: by app id
+               humble_item("Paper Lanterns - Lamp Pack", "AAAAA-AAAAA-AAAA6"),    # DLC not owned
                humble_item("Not Yet")]
-    reads = []
+    reads, searched = [], []
     f.read_humble_library = lambda url, progress: reads.append(url) or progress(1, 1) or library
     monkeypatch.setattr(steam, "owned_names", lambda s: {1: "Paper Lanterns", 2: "Elsewhere"})
-    redeemed = []
-    monkeypatch.setattr(steam, "redeem_key", lambda s, k: redeemed.append(k) or {"code": 0, "names": []})
+    monkeypatch.setattr(steam, "owned_apps", lambda s: {1, 2, 501})
+    store = {"Paper Lanterns - Moth Pack": [(501, "Paper Lanterns - Moth Pack")], "Paper Lanterns - Lamp Pack": [(502, "Paper Lanterns: Lamp Pack")]}
+    monkeypatch.setattr(steam, "store_search", lambda term: searched.append(term) or store.get(term, []))
+    f.queue_keys([("AAAAA-AAAAA-AAAA9", "Pasted by hand")], "pasted")
+    f._keys()["paused_until"] = time.time() + 3600                            # Steam's hourly limit: nothing redeems yet
     f._humble_scan()
     scan = f.humble_snapshot()["last_scan"]
-    assert scan == dict(scan, items=5, steam_keys=3, owned=1, queued=2, listed_before=0, unrevealed=1) and "error" not in scan
-    assert reads == [humble_mod.LIBRARY]
-    assert {k["names"][0] for k in f._keys()["list"] if k["source"] == "humble"} == {"Brand New", "Also New"}
-    for _ in range(100):
-        if "keys" not in f.busy:
-            break
-        time.sleep(0.02)
-    assert sorted(redeemed) == ["AAAAA-AAAAA-AAAA2", "AAAAA-AAAAA-AAAA3"]
-    assert {k["names"][0] for k in f._keys()["list"]} >= {"Brand New", "Also New"}  # Steam named nothing: Humble's title stays
-    f._humble_scan()                                                           # again: nothing new
-    assert f.humble_snapshot()["last_scan"]["queued"] == 0
+    assert scan == dict(scan, items=8, steam_keys=6, titles=5, owned=2, queued=3, spare=1, dropped=0, unrevealed=1) and "error" not in scan
+    assert reads == [humble_mod.LIBRARY] and "Brand New" in searched and "Paper Lanterns" not in searched
+    waiting = {k["key"]: k["names"][0] for k in f._keys()["list"] if k["status"] == "waiting" and k["source"] == "humble"}
+    assert waiting == {"AAAAA-AAAAA-AAAA2": "Brand New", "AAAAA-AAAAA-AAAA3": "Also New", "AAAAA-AAAAA-AAAA6": "Paper Lanterns - Lamp Pack"}
+    searched.clear()
+    f._humble_scan()                                                           # again: nothing new, nothing searched twice
+    assert f.humble_snapshot()["last_scan"]["queued"] == 0 and searched == []
+    # Steam turns the first Brand New copy down as used: the second gets its turn; Also New was bought meanwhile
+    box = f._keys()
+    next(k for k in box["list"] if k["key"] == "AAAAA-AAAAA-AAAA2")["status"] = "used"
+    monkeypatch.setattr(steam, "owned_names", lambda s: {1: "Paper Lanterns", 3: "Also New"})
+    f._humble_scan()
+    scan = f.humble_snapshot()["last_scan"]
+    assert scan["queued"] == 1 and scan["dropped"] == 1
+    waiting = {k["key"] for k in f._keys()["list"] if k["status"] == "waiting"}
+    assert waiting == {"AAAAA-AAAAA-AAAA4", "AAAAA-AAAAA-AAAA6", "AAAAA-AAAAA-AAAA9"}  # the pasted key stays put
     f.read_humble_library = lambda url, progress: library[:1] * 5             # the same item on every page
     f._humble_scan()
     assert "same items" in f.humble_snapshot()["last_scan"]["error"]

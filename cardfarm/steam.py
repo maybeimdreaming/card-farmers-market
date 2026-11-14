@@ -76,6 +76,19 @@ def owned_names(session):
     return {g["appid"]: g.get("name", "") for g in games}
 
 
+def owned_apps(session):
+    """Every app the account owns, DLC included ({appid}) - the store's own list, which the
+    owned-games list above leaves DLC out of."""
+    d = get_json(f"{STORE}/dynamicstore/userdata/", cookies=session.store_cookies())
+    return set(d.get("rgOwnedApps") or [])
+
+
+def store_search(term):
+    """The store's search ([(appid, name)], best first) - games and DLC."""
+    q = urllib.parse.urlencode({"term": term, "l": "english", "cc": "US"})
+    return [(i["id"], i.get("name", "")) for i in get_json(f"{STORE}/api/storesearch/?{q}").get("items") or []]
+
+
 def free_to_play(appid):
     """Whether the store sells the game as free to play (a game the store no longer lists: False)."""
     d = get_json(f"https://store.steampowered.com/api/appdetails?appids={appid}&filters=basic").get(str(appid)) or {}

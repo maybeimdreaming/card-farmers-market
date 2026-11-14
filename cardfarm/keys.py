@@ -69,6 +69,18 @@ class KeyRedeemer:
             self._redeem_soon()
         return len(new)
 
+    def drop_waiting(self, keys, source):
+        """Take waiting keys off the list - only ones that came from `source`, so a scan never
+        removes keys someone pasted. Returns how many went."""
+        keys, box = set(keys), self._keys()
+        with self.lock:
+            before = len(box["list"])
+            box["list"] = [k for k in box["list"] if not (k["key"] in keys and k["status"] == "waiting" and k.get("source") == source)]
+            gone = before - len(box["list"])
+        if gone:
+            self._save_keys()
+        return gone
+
     def _redeem_soon(self):
         self._in_background("keys", self._redeem_keys)
 
