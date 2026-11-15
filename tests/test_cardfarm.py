@@ -1664,6 +1664,34 @@ def test_keys_are_redeemed_in_order_and_wait_out_steams_limit(world, monkeypatch
     assert len(f._keys()["list"]) == 2
 
 
+def test_pasted_keys_keep_the_title_on_their_line():
+    text = "Your key: abcde-12345-fghij\n1. Portal 2 - Steam key: AAAAA-AAAAA-AAAA1\n" \
+           "Untitled Goose Game AAAAA-AAAAA-AAAA2, Tidewater: AAAAA-AAAAA-AAAA3\n• AAAAA-AAAAA-AAAA4"
+    assert keys_mod.find_titled_keys(text) == [("ABCDE-12345-FGHIJ", None), ("AAAAA-AAAAA-AAAA1", "Portal 2"),
+                                              ("AAAAA-AAAAA-AAAA2", "Untitled Goose Game"),
+                                              ("AAAAA-AAAAA-AAAA3", "Tidewater"), ("AAAAA-AAAAA-AAAA4", None)]
+
+
+def test_keys_for_games_you_have_are_not_spent_on_steams_limit(world, monkeypatch):
+    f = world["make"]()
+    monkeypatch.setattr(keys_mod, "GAP", 0)
+    monkeypatch.setattr(steam, "owned_names", lambda s: {10: "Portal 2"})
+    answers = {"AAAAA-AAAAA-AAAA2": {"code": 0, "names": ["Tidewater"]}, "AAAAA-AAAAA-AAAA4": {"code": 0, "names": ["Paper Lanterns"]}}
+    tried = []
+    monkeypatch.setattr(steam, "redeem_key", lambda s, k: tried.append(k) or answers[k])
+    f.add_keys("Portal 2: AAAAA-AAAAA-AAAA1\nTidewater: AAAAA-AAAAA-AAAA2\nTidewater again: AAAAA-AAAAA-AAAA4\n"
+               "tidewater AAAAA-AAAAA-AAAA3")
+    for _ in range(100):
+        if "keys" not in f.busy:
+            break
+        time.sleep(0.02)
+    snap = f.keys_snapshot()
+    # Portal 2 is owned; the second plain "Tidewater" was just added; "Tidewater again" isn't a known title
+    assert tried == ["AAAAA-AAAAA-AAAA2", "AAAAA-AAAAA-AAAA4"]
+    assert [(k["status"], k.get("skipped", False)) for k in snap["list"]] == [
+        ("owned", True), ("added", False), ("added", False), ("owned", True)]
+
+
 def test_humble_sign_in_is_kept_once_humble_says_so(world, monkeypatch, tmp_path):
     f = world["make"]()
     with pytest.raises(ValueError):

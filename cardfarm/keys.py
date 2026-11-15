@@ -6,9 +6,13 @@ import re
 import threading
 import time
 
-from . import files, steam
+from . import files, humble, steam
 
 KEY = re.compile(r"(?<![A-Z0-9-])[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}(?:-[A-Z0-9]{5}-[A-Z0-9]{5})?(?![A-Z0-9-])")
+KEY_ANY_CASE = re.compile(KEY.pattern, re.I)
+# what's left of "1. Portal 2 - Steam key:" around the title
+LIST_MARK = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+KEY_WORDS = re.compile(r"(?:\b(?:your|steam|product|activation|cd|redeem|redemption|key|code)\b|[\s:#=|–—-])+$", re.I)
 GAP = 4               # seconds between keys
 LIMIT_WAIT = 3600     # Steam's "too many attempts" lasts about an hour
 # Steam's answers (purchase_result_details), as the page shows them
@@ -18,12 +22,27 @@ RESULTS = {0: "added", 9: "owned", 13: "region", 14: "invalid", 15: "used", 24: 
 
 def find_keys(text):
     """Every Steam key in a piece of text, in order, each once."""
+    return [k for k, _ in find_titled_keys(text)]
+
+
+def find_titled_keys(text):
+    """(key, title or None) for every Steam key in a piece of text, in order, each once. The title is
+    what names the key on its line, before it ("Portal 2: XXXXX-XXXXX-XXXXX"), when something does."""
     seen, out = set(), []
-    for k in KEY.findall((text or "").upper()):
-        if k not in seen:
-            seen.add(k)
-            out.append(k)
+    for line in (text or "").splitlines():
+        start = 0
+        for m in KEY_ANY_CASE.finditer(line):
+            k = m.group(0).upper()
+            if k not in seen:
+                seen.add(k)
+                out.append((k, _title(line[start:m.start()])))
+            start = m.end()
     return out
+
+
+def _title(before):
+    s = KEY_WORDS.sub("", LIST_MARK.sub("", before)).strip(" \t,;:.|–—-")
+    return s if len(re.findall(r"[^\W\d_]", s)) >= 2 and len(s) <= 100 else None
 
 
 class KeyRedeemer:
@@ -44,7 +63,7 @@ class KeyRedeemer:
 
     def add_keys(self, text, source="pasted"):
         """Queue every key found in `text` that isn't on the list yet; returns how many were new."""
-        n = self.queue_keys([(k, None) for k in find_keys(text)], source)
+        n = self.queue_keys(find_titled_keys(text), source)
         if not n:
             raise ValueError("no new Steam keys in that text (they look like XXXXX-XXXXX-XXXXX)")
         return {"added": n}
@@ -84,9 +103,18 @@ class KeyRedeemer:
     def _redeem_soon(self):
         self._in_background("keys", self._redeem_keys)
 
+    def _owned_titles(self):
+        """The account's games by name, so keys titled as one of them aren't spent on Steam's hourly
+        limit. None when Steam won't say: then every key is tried."""
+        try:
+            return humble.OwnedNames(steam.owned_names(self.session).values())
+        except Exception as e:
+            self.log(f"Couldn't get your games from Steam ({e}); trying every key", "warn")
+            return None
+
     def _redeem_keys(self):
         box = self._keys()
-        added = 0
+        added, owned, got = 0, False, set()       # owned: read once, when a titled key comes up
         while True:
             if box["paused_until"] > time.time():
                 break
@@ -94,6 +122,17 @@ class KeyRedeemer:
                 k = next((k for k in box["list"] if k["status"] == "waiting"), None)
             if not k:
                 break
+            title = (k.get("names") or [None])[0]
+            if title:
+                if owned is False:
+                    owned = self._owned_titles()
+                if humble.title_key(title) in got or (owned and owned.owns(title)):
+                    # an attempt counts toward the limit even when Steam says "owned"; untried, it stays giftable
+                    with self.lock:
+                        k.update(status="owned", skipped=True, at=time.time())
+                    self._save_keys()
+                    self.log(f"Skipped the key for {title}: you have it already, so it wasn't tried and stays giftable")
+                    continue
             self.progress["keys"] = f"Redeeming {k['key'][:5]}…"
             try:
                 r = steam.redeem_key(self.session, k["key"])
@@ -114,6 +153,8 @@ class KeyRedeemer:
                 self.log("Steam says too many keys were tried for now; the rest are redeemed in an hour", "warn")
                 break
             what = ", ".join(r["names"]) or k["key"]
+            if status in ("added", "owned"):
+                got.update(humble.title_key(n) for n in (r["names"] or []) + ([title] if title else []))
             if status == "added":
                 added += 1
                 self.log(f"Redeemed {what}", "sell")

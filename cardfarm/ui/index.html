@@ -1221,7 +1221,7 @@ function renderKeys(s) {
   fill($("#keys"), list.length ? list.map(k => `<tr class="${k.status === "waiting" ? "" : k.status === "added" ? "" : "dim"}">
       <td class="num nowrap">${esc(k.key)}</td><td>${esc(k.names.join(", ")) || '<span class="faint">–</span>'}</td>
       <td class="pl"><span class="status ${k.status === "added" ? "added" : k.status === "waiting" || k.status === "owned" ? "waiting" : "bad"}">${
-        k.status === "waiting" && busy && s.progress.keys ? "redeeming…" : KEY_WORDS[k.status] || k.status}</span></td>
+        k.status === "waiting" && busy && s.progress.keys ? "redeeming…" : k.skipped ? "owned already, not tried" : KEY_WORDS[k.status] || k.status}</span></td>
       <td class="r num hide-sm nowrap">${k.at ? ago(k.at) + (ago(k.at) === "just now" ? "" : " ago") : ""}</td>
       <td class="acts">${k.status === "waiting" && busy ? "" : `<button class="link" data-key-clear="${esc(k.id)}">Remove</button>`}</td></tr>`).join("")
     : '<tr><td colspan="5" class="empty">No keys yet. Paste some above.</td></tr>');
