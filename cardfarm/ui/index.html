@@ -211,7 +211,11 @@ input.find { font: 500 13.5px/1 var(--font-ui); color: var(--ink); background: v
 #keys-text { width: 100%; box-sizing: border-box; margin: 12px 0 4px; padding: 10px 12px; border-radius: 10px; resize: vertical;
   border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); font: 500 13px/1.45 var(--font-mono, monospace); }
 .status { font-size: 12.5px; font-weight: 600; }
-.status.added { color: var(--sell); } .status.waiting { color: var(--faint); } .status.bad { color: var(--warn); }
+.head h3 { font-size: 14px; margin: 0; }
+#reveal-box { margin-top: 14px; padding-top: 4px; border-top: 1px solid var(--rule); }
+ul.lines { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+ul.lines li { margin: 2px 0; }
+.status.added { color: var(--sell); } .status.waiting { color: var(--ink); } .status.done { color: var(--faint); font-weight: 500; } .status.bad { color: var(--warn); }
 .hours { display: inline-flex; align-items: center; gap: 6px; }
 .hours input { width: 52px; }
 .split.inner { gap: 20px; align-items: start; }
@@ -688,17 +692,31 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
         <div><b id="k-waiting">–</b><span>Waiting</span></div>
         <div><b id="k-added">–</b><span>Added to Steam</span></div>
         <div><b id="k-owned">–</b><span>Owned already</span></div>
-        <div><b id="k-problems">–</b><span>Problems</span></div>
+        <div><b id="k-problems">–</b><span>Couldn't add</span></div>
+      </div>
+    </section>
+
+    <section id="humble-section">
+      <div class="head"><h2>Humble Bundle</h2>
+        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-scan" class="go" hidden>Scan library</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
+      <p class="note" id="humble-note">Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.</p>
+      <ul class="lines" id="humble-scan-note" hidden></ul>
+      <div id="reveal-box" hidden>
+        <div class="head"><h3>Not revealed on Humble yet <span id="reveal-count" class="faint"></span></h3>
+          <div class="tools"><button id="humble-reveal">Reveal keys</button></div></div>
+        <p class="note">Keys for games you don't have that are still hidden on Humble. Revealing them adds them to the list below.
+          It's permanent: Humble won't let you gift a key once it's revealed.</p>
+        <div class="scroll"><table><tbody id="reveal-list"></tbody></table></div>
       </div>
     </section>
 
     <section>
-      <div class="head"><h2>Redeem Steam keys</h2>
+      <div class="head"><h2>Steam keys</h2>
         <div class="tools"><button id="keys-clear">Clear finished</button><button id="keys-go" class="go" disabled>Redeem keys</button></div></div>
       <textarea id="keys-text" rows="5" spellcheck="false" autocomplete="off" aria-label="Keys to redeem"
-        placeholder="Paste keys, an email or a whole page: every Steam key in it is found (XXXXX-XXXXX-XXXXX)"></textarea>
+        placeholder="Paste keys, an email or a whole page to add them: every Steam key in it is found (XXXXX-XXXXX-XXXXX)"></textarea>
       <div class="alert" id="keys-paused" hidden></div>
-      <p class="note">Keys are added one after another. Steam allows only so many tries an hour (wrong keys count the most); when it says
+      <p class="note">Keys from Humble and anything you paste are added to Steam one after another. Steam allows only so many tries an hour (wrong keys count the most); when it says
         to slow down, the rest wait and go on by themselves. Keys stay on this computer only.</p>
       <div class="scroll">
         <table>
@@ -708,12 +726,6 @@ tr.picked td { background: color-mix(in srgb, var(--signal) 10%, var(--sheet)); 
       </div>
     </section>
 
-    <section id="humble-section">
-      <div class="head"><h2>Humble Bundle</h2>
-        <div class="tools"><button id="humble-out" class="link" hidden>Sign out of Humble</button><button id="humble-reveal" hidden>Reveal keys</button><button id="humble-scan" class="go" hidden>Scan library</button><button id="humble-in" class="go">Sign in to Humble</button></div></div>
-      <p class="note" id="humble-note">Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.</p>
-      <p class="note" id="humble-scan-note" hidden></p>
-    </section>
     </div>
 
     <section>
@@ -1220,7 +1232,7 @@ function renderKeys(s) {
   const list = [...K.list].reverse();
   fill($("#keys"), list.length ? list.map(k => `<tr class="${k.status === "waiting" ? "" : k.status === "added" ? "" : "dim"}">
       <td class="num nowrap">${esc(k.key)}</td><td>${esc(k.names.join(", ")) || '<span class="faint">–</span>'}</td>
-      <td class="pl"><span class="status ${k.status === "added" ? "added" : k.status === "waiting" || k.status === "owned" ? "waiting" : "bad"}">${
+      <td class="pl"><span class="status ${k.status === "added" ? "added" : k.status === "waiting" ? "waiting" : k.status === "owned" ? "done" : "bad"}">${
         k.status === "waiting" && busy && s.progress.keys ? "redeeming…" : k.skipped ? "owned already, not tried" : KEY_WORDS[k.status] || k.status}</span></td>
       <td class="r num hide-sm nowrap">${k.at ? ago(k.at) + (ago(k.at) === "just now" ? "" : " ago") : ""}</td>
       <td class="acts">${k.status === "waiting" && busy ? "" : `<button class="link" data-key-clear="${esc(k.id)}">Remove</button>`}</td></tr>`).join("")
@@ -1229,24 +1241,33 @@ function renderKeys(s) {
   $("#humble-in").hidden = h.signed_in; $("#humble-out").hidden = !h.signed_in;
   $("#humble-note").textContent = h.signed_in ? `Signed in to Humble${h.who ? " as " + h.who : ""}.`
     : "Sign in to Humble in a window of this app, on Humble's own pages. The sign-in stays on this computer.";
-  // the library scan: its revealed Steam keys go to the list above, minus games you have
+  // the library scan: its revealed Steam keys go to the list below, minus games you have
   const scanning = s.busy.includes("humble"), L = h.last_scan;
   $("#humble-scan").hidden = !h.signed_in; $("#humble-scan").disabled = scanning;
-  $("#humble-scan").textContent = scanning ? "Scanning…" : "Scan library";
-  const scanNote = scanning ? (s.progress.humble || "Reading your Humble library…")
-    : !L ? (h.signed_in ? "Scan library opens your Humble library in a small window (minimised) and adds every revealed Steam key for a game you don't have yet to the list above." : "")
-    : L.error ? `Last scan didn't finish: ${L.error}`
-    : `Last scan ${ago(L.at)}${ago(L.at) === "just now" ? "" : " ago"}: ${L.steam_keys} revealed Steam keys for ${L.titles} titles;`
-      + ` ${L.owned} titles you have already, ${L.queued} keys added to the list`
-      + `${L.spare ? `, ${L.spare} spare copies kept unused` : ""}${L.dropped ? `, ${L.dropped} taken off the list` : ""}`
-      + `${L.unrevealed ? `; ${L.unrevealed} not revealed on Humble yet` : ""}.`;
-  $("#humble-scan-note").hidden = !scanNote; $("#humble-scan-note").textContent = scanNote;
+  $("#humble-scan").textContent = scanning ? "Scanning…" : L ? "Scan again" : "Scan library";
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + "s")}`;
+  const lines = scanning ? [s.progress.humble || "Reading your Humble library…"]
+    : !L ? (h.signed_in ? ["Scan library reads your Humble library in a small window and adds the Steam keys for games you don't have to the list below."] : [])
+    : L.error ? [`The last scan didn't finish: ${L.error}`]
+    : [`Scanned ${ago(L.at)}${ago(L.at) === "just now" ? "" : " ago"}: ${plural(L.steam_keys, "revealed Steam key")} for ${plural(L.titles, "title")}.`,
+       `${plural(L.owned, "title")} you have already: left alone.`,
+       `${plural(L.queued, "new key")} added to the list below${L.dropped ? `, ${L.dropped} taken off it` : ""}.`,
+       ...(L.spare ? [`${plural(L.spare, "spare copy", "spare copies")} kept unused, so ${L.spare === 1 ? "it stays" : "they stay"} giftable.`] : []),
+       ...(L.unrevealed ? [`${plural(L.unrevealed, "key")} not revealed on Humble yet${(L.to_reveal || []).length ? `; ${(L.to_reveal || []).length} of them for games you don't have (below)` : ""}.`] : [])];
+  $("#humble-scan-note").hidden = !lines.length;
+  fill($("#humble-scan-note"), lines.map(l => `<li>${esc(l)}</li>`).join(""));
   // keys Humble hasn't revealed, for games you don't have: revealing is for good (no gifting after)
   const toReveal = (L && L.to_reveal) || [], revealing = s.busy.includes("humble-reveal");
-  $("#humble-reveal").hidden = !h.signed_in || (!toReveal.length && !revealing);
+  $("#reveal-box").hidden = !h.signed_in || (!toReveal.length && !revealing);
+  $("#reveal-count").textContent = toReveal.length ? toReveal.length : "";
+  const now = revealing && s.progress["humble-reveal"] || "";
+  fill($("#reveal-list"), toReveal.map(r => `<tr><td>${esc(r.title)}</td><td class="pl">${
+    now.startsWith("Revealing " + r.title + " (") ? '<span class="status waiting">revealing…</span>'
+    : r.error ? `<span class="status bad">didn't work last time</span> <span class="faint">${esc(r.error)}</span>`
+    : '<span class="status done">waiting</span>'}</td></tr>`).join(""));
   $("#humble-reveal").disabled = revealing || scanning;
-  $("#humble-reveal").textContent = revealing ? (s.progress["humble-reveal"] || "Revealing…")
-    : `Reveal ${toReveal.length} key${toReveal.length === 1 ? "" : "s"}`;
+  $("#humble-reveal").textContent = revealing ? "Revealing…"
+    : toReveal.some(r => r.error) ? "Try again" : `Reveal ${plural(toReveal.length, "key")}`;
 }
 
 function renderTape(history) {
@@ -1471,7 +1492,7 @@ $("#humble-in").onclick = () => post("/api/humble/sign-in");
 $("#humble-scan").onclick = () => post("/api/humble/scan");
 $("#humble-reveal").onclick = () => {
   const list = (state?.humble?.last_scan?.to_reveal || []).map(r => "• " + r.title).join("\n");
-  confirm(`Reveal these Steam keys on Humble and add them to the list above?\n\n${list}\n\n`
+  confirm(`Reveal these Steam keys on Humble and add them to the list below?\n\n${list}\n\n`
     + "Revealing can't be undone: a revealed key can't be gifted any more. Only games you don't have are listed.")
     && post("/api/humble/reveal");
 };

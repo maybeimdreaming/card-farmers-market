@@ -1664,6 +1664,30 @@ def test_keys_are_redeemed_in_order_and_wait_out_steams_limit(world, monkeypatch
     assert len(f._keys()["list"]) == 2
 
 
+def test_keys_that_needed_their_base_game_are_tried_again_once_a_key_is_added(world, monkeypatch):
+    f = world["make"]()
+    monkeypatch.setattr(keys_mod, "GAP", 0)
+    have = set()
+    def redeem(s, k):
+        tried.append(k)
+        if k == "AAAAA-AAAAA-AAAA2":
+            have.add("base")
+            return {"code": 0, "names": ["Base Game"]}
+        return {"code": 0 if "base" in have else 24, "names": []}
+    tried = []
+    monkeypatch.setattr(steam, "redeem_key", redeem)
+    f.add_keys("AAAAA-AAAAA-AAAA1 AAAAA-AAAAA-AAAA2")                         # the DLC comes up first
+    for _ in range(100):
+        if "keys" not in f.busy:
+            break
+        time.sleep(0.02)
+    assert tried == ["AAAAA-AAAAA-AAAA1", "AAAAA-AAAAA-AAAA2", "AAAAA-AAAAA-AAAA1"]
+    assert [k["status"] for k in f.keys_snapshot()["list"]] == ["added", "added"]
+    # still no base game: tried once more after the next added key, not over and over
+    f._key_box["list"].append({"key": "AAAAA-AAAAA-AAAA3", "id": "x3", "status": "needs_base", "names": [], "at": time.time()})
+    assert f._retry_needs_base() == 0
+
+
 def test_pasted_keys_keep_the_title_on_their_line():
     text = "Your key: abcde-12345-fghij\n1. Portal 2 - Steam key: AAAAA-AAAAA-AAAA1\n" \
            "Untitled Goose Game AAAAA-AAAAA-AAAA2, Tidewater: AAAAA-AAAAA-AAAA3\n• AAAAA-AAAAA-AAAA4"
@@ -1832,32 +1856,72 @@ def test_humble_reveal_presses_reveal_and_queues_the_key(world, monkeypatch):
     page = {"drawn": 0, "pressed": False, "confirmed": False}
 
     def js(code):                                                              # an item page that asks "are you sure"
-        if code == humble_mod.REVEAL_PRESS:
+        if code == humble_mod.REVEAL_KIT:
+            return ""
+        assert '("Fresh Game"' in code                                        # everything goes by the game's own card
+        if code.startswith("__cfReveal.press("):
             page["drawn"] += 1
             if page["drawn"] < 3:
                 return "none"                                                  # still drawing
             page["pressed"] = True
             return "pressed"
-        if code == humble_mod.REVEAL_LOOK:
+        if code.startswith("__cfReveal.look("):
             if page["pressed"] and not page["confirmed"]:
                 page["confirmed"] = True
-                return json.dumps({"keys": [], "pressed": "Reveal Key"})
-            return json.dumps({"keys": ["BBBBB-BBBBB-BBBB1"] if page["confirmed"] else [], "pressed": ""})
-    assert humble_mod.reveal_in_page(js) == "BBBBB-BBBBB-BBBB1" and page["confirmed"]
-    with pytest.raises(ValueError):
-        humble_mod.reveal_in_page(lambda code: "none" if code == humble_mod.REVEAL_PRESS else '{"keys": []}', wait=0)
+                return json.dumps({"keys": [], "pressed": "Reveal Key", "card": True, "reveal": False})
+            return json.dumps({"keys": ["BBBBB-BBBBB-BBBB1"] if page["confirmed"] else [], "pressed": "", "card": True,
+                               "reveal": not page["pressed"]})
+    assert humble_mod.reveal_in_page(js, "Fresh Game") == "BBBBB-BBBBB-BBBB1" and page["confirmed"]
+    with pytest.raises(ValueError, match="no Reveal button"):
+        humble_mod.reveal_in_page(lambda code: "none" if "press(" in code else '{"keys": []}', "Fresh Game", wait=0)
+    with pytest.raises(ValueError, match="more than one"):                     # two Reveal buttons under one title
+        humble_mod.reveal_in_page(lambda code: '{"keys": [], "card": "many"}', "Fresh Game", wait=5)
+    with pytest.raises(humble_mod.OutOfStock):                                 # Humble has no keys left for it
+        humble_mod.reveal_in_page(lambda code: '{"keys": [], "card": true, "reveal": true, "oos": true}', "Fresh Game", wait=5)
+    # a press before Humble's page is ready does nothing: pressed again while the button is still there
+    early = {"presses": 0}
+
+    def slow_page(code):
+        if "press(" in code:
+            early["presses"] += 1
+            return "pressed"
+        if "look(" in code:
+            done = early["presses"] >= 2                                       # the second press is the one that takes
+            return json.dumps({"keys": ["CCCCC-CCCCC-CCCC1"] if done else [], "card": True, "reveal": not done})
+        return ""
+    assert humble_mod.reveal_in_page(slow_page, "Fresh Game", again=0) == "CCCCC-CCCCC-CCCC1" and early["presses"] == 2
+    # until Humble's page has wired the button up a press is held back; past force_after it goes anyway
+    held = {"codes": []}
+
+    def unwired(code):
+        if "press(" in code:
+            held["codes"].append(code)
+            return "pressed" if code.endswith("true)") else "not ready"
+        if "look(" in code:
+            done = any(c.endswith("true)") for c in held["codes"])
+            return json.dumps({"keys": ["DDDDD-DDDDD-DDDD1"] if done else [], "card": True, "reveal": not done})
+        return ""
+    clock, real_time = iter(range(0, 1000, 5)), humble_mod.time.time
+    monkeypatch.setattr(humble_mod.time, "time", lambda: next(clock))
+    assert humble_mod.reveal_in_page(unwired, "Fresh Game", force_after=20) == "DDDDD-DDDDD-DDDD1"
+    assert held["codes"][0].endswith("false)") and held["codes"][-1].endswith("true)")
+    monkeypatch.setattr(humble_mod.time, "time", real_time)
+    with pytest.raises(ValueError, match="didn't respond"):                    # but not forever
+        humble_mod.reveal_in_page(lambda code: "pressed" if "press(" in code else '{"keys": [], "card": true, "reveal": true}',
+                                  "Fresh Game", again=0)
 
     f = world["make"]()
     monkeypatch.setattr(keys_mod, "GAP", 0)
-    f._humble_box = {"cookies": {"session": "x"}, "last_scan": {"to_reveal": [{"id": "pe-1", "title": "Fresh Game"},
-                                                                            {"id": "pe-2", "title": "Broken Page"}]}}
+    f._humble_box = {"cookies": {"session": "x"}, "last_scan": {"to_reveal": [{"id": "pe-2", "title": "Broken Page"},
+                                                                            {"id": "pe-1", "title": "Fresh Game"}]}}
     with pytest.raises(ValueError):
         type(f).humble_reveal(type("Empty", (), {"_humble": lambda s: {}})())   # nothing picked yet
     opened = []
     f._keys()["paused_until"] = time.time() + 3600
-    f.humble_page = lambda url, work: opened.append(url) or (work(js) if url.endswith("pe-1") else (_ for _ in ()).throw(ValueError("no Reveal button")))
+    f.humble_page = lambda url, work, show=False: opened.append((url, show)) or (work(js) if url.endswith("pe-1") else (_ for _ in ()).throw(ValueError("no Reveal button")))
     page.update(drawn=5, pressed=False, confirmed=True)
     f._humble_reveal()
-    assert opened == ["https://www.humblebundle.com/home/library/pe-1", "https://www.humblebundle.com/home/library/pe-2"]
+    # a page that fails no longer stops the rest
+    assert opened == [("https://www.humblebundle.com/home/library/pe-2", True), ("https://www.humblebundle.com/home/library/pe-1", True)]
     assert [(k["names"], k["source"]) for k in f._keys()["list"]] == [(["Fresh Game"], "humble")]
     assert [r["title"] for r in f._humble()["last_scan"]["to_reveal"]] == ["Broken Page"]   # the failed one waits for next time

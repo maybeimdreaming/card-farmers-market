@@ -174,7 +174,7 @@ def signed_in_as(cookies):
 
 class Humble:
     open_humble = None  # set by the window: opens Humble's sign-in, calls back with its cookies
-    humble_page = None  # set by the window: (url, fn) -> fn(js) run in that Humble page, js(code) -> text
+    humble_page = None  # set by the window: (url, fn, show=False) -> fn(js) run in that Humble page, js(code) -> text
 
     def _humble(self):
         if getattr(self, "_humble_box", None) is None:
@@ -333,20 +333,30 @@ class Humble:
         key can't be gifted any more - which is why only those for games you don't have are picked."""
         box = self._humble()
         scan = box.get("last_scan") or {}
-        done = 0
+        done, failed, broken = 0, [], 0
         try:
-            while scan.get("to_reveal"):
-                item = scan["to_reveal"][0]
-                self.progress["humble-reveal"] = f"Revealing {item['title']} ({done + 1} of {done + len(scan['to_reveal'])})"
-                key = self.humble_page(f"{SITE}/home/library/{item['id']}", reveal_in_page)
+            for item in list(scan.get("to_reveal") or []):
+                self.progress["humble-reveal"] = f"Revealing {item['title']} ({done + len(failed) + 1} of {len(scan['to_reveal']) + done})"
+                try:
+                    # shown, not minimised: Humble ignores the Reveal press in a minimised window
+                    key = self.humble_page(f"{SITE}/home/library/{item['id']}", lambda js: reveal_in_page(js, item["title"]), show=True)
+                except Exception as e:
+                    # this one waits for next time; the rest still get their turn
+                    self.log(f"Couldn't reveal {item['title']} on Humble: {e}", "warn")
+                    item["error"] = str(e)                                    # shown next to it on the Keys page
+                    files.write_json(self._path("humble.json"), box, private=True)
+                    failed.append(item)
+                    broken += not isinstance(e, OutOfStock)                   # out of stock says nothing about the pages
+                    if broken >= 3 and not done:
+                        self.log("Stopped revealing: Humble's pages aren't working for this right now", "warn")
+                        break
+                    continue
                 self.queue_keys([(key, item["title"])], "humble")
                 self.log(f"Revealed the Steam key for {item['title']} on Humble", "sell")
-                scan["to_reveal"].pop(0)
+                scan["to_reveal"].remove(item)
                 done += 1
                 files.write_json(self._path("humble.json"), box, private=True)
                 time.sleep(2)
-        except Exception as e:
-            self.log(f"Couldn't reveal {item['title']} on Humble: {e}", "warn")
         finally:
             self.progress.pop("humble-reveal", None)
 
@@ -357,51 +367,102 @@ class Humble:
         return {"signed_in": bool(box.get("cookies")), "who": name, "at": box.get("at", 0), "last_scan": box.get("last_scan")}
 
 
-# Pressing an item page's Reveal button (and the "are you sure" one, if Humble asks) and reading the
-# key off the page. Text, not Humble's internals: the item page's code isn't on the library page.
-REVEAL_PRESS = r"""
+# Pressing one game's Reveal button on an item page (and the "are you sure" one, if Humble asks) and
+# reading its key. A bundle's page holds a card per game, each with its own Reveal button, so
+# everything goes by the card that carries the game's title - never the first button or key on the
+# page. Text, not Humble's internals: the item page's code isn't on the library page.
+REVEAL_KIT = r"""
 (function () {
-  var b = Array.from(document.querySelectorAll("button, a")).find(function (e) {
-    return /^\s*reveal( key)?\s*$/i.test(e.innerText || "") && !e.disabled; });
-  if (!b) return "none";
-  b.click();
-  return "pressed";
-})()
-"""
-REVEAL_LOOK = r"""
-(function () {
-  var text = (document.body.innerText || "") + " " + Array.from(document.querySelectorAll("input, textarea"))
-    .map(function (i) { return i.value || ""; }).join(" ");
-  var keys = text.toUpperCase().match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}(?:-[A-Z0-9]{5}-[A-Z0-9]{5})?/g) || [];
-  var dialog = document.querySelector("[role=alertdialog], [role=dialog]"), pressed = "";
-  if (dialog) {
-    var b = Array.from(dialog.querySelectorAll("button")).find(function (e) {
-      return /^\s*(reveal|confirm|continue|yes|ok)\b/i.test(e.innerText || "") && !e.disabled && !e.dataset.cfPressed; });
-    if (b) { b.dataset.cfPressed = "1"; b.click(); pressed = b.innerText.trim(); }
+  if (window.__cfReveal) return;
+  var KEY = /[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}(?:-[A-Z0-9]{5}-[A-Z0-9]{5})?/g;
+  function norm(t) { return (t || "").toLowerCase().replace(/[\u2122\u00ae\u00a9]/g, "").replace(/\s+/g, " ").trim(); }
+  function isReveal(e) { return /^\s*reveal( key)?\s*$/i.test(e.innerText || "") && !e.disabled; }
+  function keysIn(el) {
+    var t = (el.innerText || "") + " " + Array.from(el.querySelectorAll("input, textarea"))
+      .map(function (i) { return i.value || ""; }).join(" ");
+    return Array.from(new Set(t.toUpperCase().match(KEY) || []));
   }
-  return JSON.stringify({keys: keys, pressed: pressed});
-})()
+  function dialogs() {   // Humble's own dialogs, not the cookie banner's
+    return Array.from(document.querySelectorAll("[role=dialog], [role=alertdialog], dialog")).filter(function (d) {
+      return !d.closest("#onetrust-consent-sdk, #onetrust-banner-sdk, [id^=onetrust]"); });
+  }
+  // the card holding the game: from the element whose text is the title, the first ancestor with a
+  // Reveal button or key in it - "many" when that ancestor holds more than one (can't tell which)
+  function card(title) {
+    var want = norm(title), found = null, many = false;
+    Array.from(document.querySelectorAll("body *")).forEach(function (e) {
+      if (found || e.children.length > 1 || norm(e.innerText) !== want) return;
+      for (var el = e.parentElement; el && el !== document.body; el = el.parentElement) {
+        var n = Array.from(el.querySelectorAll("button, a")).filter(isReveal).length + keysIn(el).length;
+        if (!n) continue;
+        if (n === 1) found = el; else many = true;
+        return;
+      }
+    });
+    return found || (many ? "many" : null);
+  }
+  // Humble's page is React: a button answers clicks once React has hung its props on it
+  function wired(e) { return Object.keys(e).some(function (k) { return k.indexOf("__reactProps") === 0; }); }
+  window.__cfReveal = {
+    press: function (title, force) {
+      var c = card(title);
+      if (!c) return "none";
+      if (c === "many") return "many";
+      var b = Array.from(c.querySelectorAll("button, a")).find(isReveal);
+      if (!b) return "none";
+      if (!force && !wired(b)) return "not ready";
+      b.click();
+      return "pressed";
+    },
+    look: function (title) {
+      var c = card(title), keys = c && c !== "many" ? keysIn(c) : [], pressed = "";
+      dialogs().forEach(function (d) {
+        keys = keys.concat(keysIn(d));
+        var b = Array.from(d.querySelectorAll("button")).find(function (e) {
+          return /^\s*(reveal|confirm|continue|yes|ok)\b/i.test(e.innerText || "") && !e.disabled && !e.dataset.cfPressed; });
+        if (b && !pressed) { b.dataset.cfPressed = "1"; b.click(); pressed = b.innerText.trim(); }
+      });
+      var reveal = !!(c && c !== "many" && Array.from(c.querySelectorAll("button, a")).find(isReveal));
+      // Humble runs out of keys for some games now and then, and says so on the card or in a dialog
+      var oos = [c && c !== "many" ? c : null].concat(dialogs()).some(function (el) {
+        return el && /out of stock|sold out|no (more )?keys (are )?(left|available)/i.test(el.innerText || ""); });
+      return JSON.stringify({keys: keys, pressed: pressed, card: c === "many" ? "many" : !!c, reveal: reveal, oos: oos});
+    }
+  };
+})();
 """
 
 
-def reveal_in_page(js, wait=25):
-    """In an item's page: press Reveal (once it has drawn), confirm if asked, and return the key it
-    then shows. A key already on the page is returned as it is."""
-    end = time.time() + wait
-    while True:
-        look = json.loads(js(REVEAL_LOOK) or "{}")
-        if look.get("keys"):
-            return look["keys"][0]
-        state = js(REVEAL_PRESS)
-        if state == "pressed":
-            break
-        if time.time() > end:
-            raise ValueError("the item's page shows no Reveal button")
-        time.sleep(1)
-    end = time.time() + wait
+class OutOfStock(ValueError):
+    """Humble has no keys left for the game for now: nothing wrong with the page or the press."""
+
+
+def reveal_in_page(js, title, wait=60, again=8, tries=3, force_after=20):
+    """In an item's page: press the Reveal button on `title`'s card, confirm if asked, and return
+    the key that then shows. A key already on the card is returned as it is. Humble's page takes a
+    while to wire its buttons up, and a press before that is lost, so the press waits until the
+    button is wired (or `force_after` seconds, should Humble's page change), and while the card
+    still shows its Reveal button `again` seconds after a press, it's pressed again. Once Humble
+    takes a press the button turns into "Redeeming..." and then the key."""
+    js(REVEAL_KIT)
+    t = json.dumps(title)
+    start = time.time()
+    end, pressed, last = start + wait, 0, 0.0
     while time.time() < end:
+        got = json.loads(js(f"__cfReveal.look({t})") or "{}")
+        if got.get("keys"):
+            return got["keys"][0]
+        if got.get("oos"):
+            raise OutOfStock("Humble is out of keys for it right now - try again another day")
+        if got.get("card") == "many" and not pressed:                     # mid-redraw after a press is fine
+            raise ValueError("the page has more than one Reveal button under that title")
+        if got.get("reveal") and (not pressed or time.time() - last >= again):
+            if pressed >= tries:
+                raise ValueError(f"Humble's Reveal button didn't respond ({tries} presses)")
+            force = "true" if time.time() - start >= force_after else "false"
+            if js(f"__cfReveal.press({t}, {force})") == "pressed":
+                pressed, last = pressed + 1, time.time()
         time.sleep(1)
-        look = json.loads(js(REVEAL_LOOK) or "{}")
-        if look.get("keys"):
-            return look["keys"][0]
+    if not pressed:
+        raise ValueError("the item's page shows no Reveal button for it")
     raise ValueError("Humble didn't show the key after Reveal")

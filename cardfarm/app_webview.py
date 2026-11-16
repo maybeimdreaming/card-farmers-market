@@ -84,10 +84,10 @@ class WebviewApp:
         finally:
             self._signing_in = None
 
-    def _humble_page(self, url, work):
+    def _humble_page(self, url, work, show=False):
         """A page of Humble's (the library, an item) in a window of its own; returns work(js), js(code)
         running code in that page and returning its value as text (the farm's thread waits here)."""
-        win = webview.create_window("Humble Bundle (Card Farmer's Market)", url, width=760, height=720, minimized=True)
+        win = webview.create_window("Humble Bundle (Card Farmer's Market)", url, width=760, height=720, minimized=not show)
         loaded, closed = threading.Event(), []
         win.events.loaded += loaded.set
         win.events.closed += lambda: closed.append(True)

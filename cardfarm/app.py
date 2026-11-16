@@ -177,8 +177,9 @@ class CardFarmApp(Adw.Application):
         GLib.timeout_add_seconds(2, poll)
         return False
 
-    def _humble_page(self, url, work):
-        """A page of Humble's (the library, an item) in a window of its own, minimised, holding the
+    def _humble_page(self, url, work, show=False):
+        """A page of Humble's (the library, an item) in a window of its own, minimised unless `show`
+        (Humble ignores Reveal presses in a minimised window), holding the
         saved Humble sign-in; returns work(js), js(code) running code in that page and returning
         its value as text. The farm's thread waits here; the window's work happens on GTK's."""
         box, loaded = {}, threading.Event()
@@ -210,7 +211,8 @@ class CardFarmApp(Adw.Application):
                 if not pending[0]:
                     view.load_uri(url)
                     win.present()
-                    win.minimize()
+                    if not show:
+                        win.minimize()
                     done()
             for name, value in cookies:
                 c = Soup.Cookie.new(name, value, "www.humblebundle.com", "/", -1)
@@ -242,8 +244,15 @@ class CardFarmApp(Adw.Application):
                 raise ValueError("Humble signed this app out - sign in to Humble again")
             return work(js)
         finally:
-            if box.get("win"):
-                GLib.idle_add(box["win"].destroy)
+            # let go of the window and its view on GTK's thread: WebKit aborts the whole app when a
+            # view's last reference goes on another thread (Python's garbage collector, here)
+            def close():
+                box.pop("view", None)
+                win = box.pop("win", None)
+                if win:
+                    win.destroy()
+                return False
+            GLib.idle_add(close)
 
     def _scan_flag(self):
         """`touch humble-scan` in the data folder: scan the Humble library (from outside the window)."""

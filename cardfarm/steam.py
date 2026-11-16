@@ -878,6 +878,6 @@ def redeem_key(session, key):
     r = post_json(f"{STORE}/account/ajaxregisterkey/", {"product_key": key, "sessionid": session.sessionid},
                   cookies=session.store_cookies(), headers={"Referer": f"{STORE}/account/registerkey", "Origin": STORE})
     items = ((r.get("purchase_receipt_info") or {}).get("line_items")) or []
-    names = [i.get("line_item_description") for i in items if i.get("line_item_description")]
+    names = [html.unescape(i["line_item_description"]) for i in items if i.get("line_item_description")]   # it comes as "Road &amp; Track"
     code = 0 if r.get("success") == 1 else int(r.get("purchase_result_details") or -1)
     return {"code": code, "names": names}

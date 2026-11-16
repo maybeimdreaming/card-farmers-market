@@ -158,6 +158,8 @@ class KeyRedeemer:
             if status == "added":
                 added += 1
                 self.log(f"Redeemed {what}", "sell")
+                if self._retry_needs_base():
+                    self.log("Trying again the keys that needed a base game")
             else:
                 self.log(f"Key {k['key'][:5]}…: {MESSAGES.get(status, 'Steam refused it (code %d)' % r['code'])}"
                          + (f" ({what})" if r["names"] else ""), "warn" if status in ("invalid", "used", "error") else "info")
@@ -166,9 +168,24 @@ class KeyRedeemer:
         if added and self.settings["notify"]:
             self.notify(f"Redeemed {added} key{'s' * (added > 1)}", "They're in your Steam library.")
 
+    def _retry_needs_base(self):
+        """Queue again the keys Steam turned down for want of a base game, if a key was added since
+        they were tried - it may have been that game (a bundle's DLC often comes up before it).
+        Each try stamps the key again, so it waits for the next added key before another."""
+        box = self._keys()
+        with self.lock:
+            last = max((k["at"] for k in box["list"] if k["status"] == "added"), default=0)
+            again = [k for k in box["list"] if k["status"] == "needs_base" and k["at"] < last]
+            for k in again:
+                k["status"] = "waiting"
+        if again:
+            self._save_keys()
+        return len(again)
+
     def _keys_chore(self):
         """Go on after a restart or after Steam's hourly limit."""
         box = self._keys()
+        self._retry_needs_base()
         if box["paused_until"] <= time.time() and any(k["status"] == "waiting" for k in box["list"]):
             self._redeem_soon()
 
