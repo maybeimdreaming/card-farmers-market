@@ -8,7 +8,7 @@ import threading
 import time
 import urllib.parse
 
-from . import files, http
+from . import files
 from .http import HttpError, get_json, post_json, request
 from .http import paused_until as http_paused_until
 

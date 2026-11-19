@@ -15,7 +15,6 @@ Windows and macOS need `pip install pyinstaller pywebview pillow` first. Every d
 THIRD-PARTY-NOTICES.txt: the licences of Python and of each library bundled into it (the .pyz
 bundles nothing; it uses what the system has)."""
 import importlib.metadata as md
-import os
 import pathlib
 import platform
 import shutil

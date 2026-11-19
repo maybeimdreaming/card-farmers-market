@@ -419,8 +419,16 @@ class MarketParts:
         self.save()
 
     def _do_booster(self, e):
+        """Make the pack from gems and list it. Once it's made that's saved on the job, so a run
+        again (after Steam's "too many requests", or a restart) lists the pack it made instead of
+        spending gems on another."""
         o = e["booster"]
         hash_name = f"{o['appid']}-{o['name']} Booster Pack"
+        if e.get("made"):
+            new = [a for a, x in steam._inventory(self.session, *steam.CARDS) if x.get("market_hash_name") == hash_name]
+            if not new:
+                raise RuntimeError("the booster pack it made isn't in the inventory; sell it from the Items tab")
+            return self._list_booster(e, hash_name, new)
         _, tradable = steam.booster_options(self.session)
         if tradable < o["gems"]:  # unpack sacks for the difference, when there are some
             stock = steam.gem_stock(self.session)
@@ -435,6 +443,9 @@ class MarketParts:
             self.log(f"Unpacked {-(-(o['gems'] - tradable) // 1000)} sack(s) of gems for it", "gems")
         before = {a["assetid"] for a, _ in steam._inventory(self.session, *steam.CARDS)}
         steam.create_booster(self.session, o["appid"], o["series"])
+        with self.lock:
+            e["made"] = True
+        self.save()
         self.log(f"Made a booster pack for {o['name']} from {o['gems']} gems", "gems")
         for _ in range(5):
             time.sleep(3)
@@ -444,6 +455,10 @@ class MarketParts:
                 break
         else:
             raise RuntimeError("the new booster pack didn't show up in the inventory yet; sell it from the Items tab")
+        return self._list_booster(e, hash_name, new)
+
+    def _list_booster(self, e, hash_name, new):
+        o = e["booster"]
         stats = self.prices.item_stats(753, hash_name)
         price = min(p for p in (stats["lowest"], stats["median"]) if p) if (stats["lowest"] or stats["median"]) else None
         buyer = max(rules.asking_price(price, self.settings) or 0, self.settings["items_min_cents"])
@@ -589,20 +604,45 @@ class MarketParts:
         self._until_closed(order["orderid"])
         return bought
 
+    def _bought(self, e, hash_name, n, cents):
+        """A buying job's progress, saved on its queue entry as each purchase lands, so a job run
+        again (after Steam's "too many requests", or a restart) never buys the same cards twice."""
+        if not n:
+            return
+        with self.lock:
+            done = e.setdefault("bought", {})
+            done[hash_name] = done.get(hash_name, 0) + n
+            e["spent"] = e.get("spent", 0) + cents
+        self.save()
+
+    def _held(self, appid):
+        """How many of each of a game's normal cards are in the inventory now (cards listed and
+        waiting for the Steam app don't count)."""
+        pending, held = steam.pending_listings(self.session), {}
+        for c in steam.cards_in_inventory(self.session):
+            if c["appid"] == appid and not c["foil"] and c["assetid"] not in pending:
+                held[c["hash"]] = held.get(c["hash"], 0) + 1
+        return held
+
     def _do_set(self, e):
         """Price every missing card (cheapest listing that isn't yours) and stop before buying
-        anything if one can't be had or the total is over the limit; then buy them and craft."""
-        o, spent = e["offer"], 0
+        anything if one can't be had or the total is over the limit; then buy them and craft.
+        Run again, it buys only what's still missing: a card counts as bought once it's in the
+        inventory or this job saved buying it."""
+        o, spent = e["offer"], e.get("spent", 0)
         if steam.card_set(self.session, o["appid"])["level"] >= 5:
             raise RuntimeError(f"the {o['game']} badge is already at its top level")
+        held, done = self._held(o["appid"]), e.get("bought", {})
         plan = []
         for hash_name in o["missing_hashes"]:
+            if held.get(hash_name) or done.get(hash_name):
+                continue
             price = steam.cheapest_listing(self.session, self.prices, hash_name)
             if not price:
                 raise RuntimeError(f"nobody else is selling {hash_name.split('-', 1)[1]} right now; nothing bought")
             plan.append((hash_name, price))
         total, budget = sum(p for _, p in plan), o.get("limit") or self.settings["set_budget_cents"]
-        if total > budget:
+        if spent + total > budget:
             raise RuntimeError(f"the {o['game']} cards cost ${total / 100:.2f} now, over your limit; nothing bought")
         for n, (hash_name, price) in enumerate(plan):
             name = hash_name.split("-", 1)[1]
@@ -612,6 +652,7 @@ class MarketParts:
                 if not price or spent + price + rest > budget or not self._buy(hash_name, price):
                     raise RuntimeError(f"couldn't buy {name} within your limit; stopped after ${spent / 100:.2f}")
             spent += price
+            self._bought(e, hash_name, 1, price)
             self.log(f"Bought {name} for ${price / 100:.2f}")
         for attempt in range(6):
             try:
@@ -869,7 +910,9 @@ class PatientBuying:
             orders, patient = self.state.setdefault("orders", []), self.state.setdefault("patient", [])
             if not any(w.get("job") == job for w in patient):
                 patient.extend({"appid": c["appid"], "game": c["game"], "hashes": c["missing_hashes"], "job": job} for c in crafts)
-            have = {o["hash"] for o in orders if o.get("job") == job}
+            # what this job placed is also kept on the job itself: an order that filled meanwhile
+            # leaves the orders list, and mustn't be placed a second time
+            have = {o["hash"] for o in orders if o.get("job") == job} | set(e.get("placed", []))
         try:
             for h, quantity in wanted.items():
                 if h in have:
@@ -880,6 +923,7 @@ class PatientBuying:
                 with self.lock:
                     self.state["orders"].append({"orderid": order["orderid"], "hash": h, "price": price, "quantity": quantity,
                                                  "placed": time.time(), "job": job})
+                    e.setdefault("placed", []).append(h)
                 self.save()
         except Exception as err:
             if not (isinstance(err, steam.HttpError) and err.status == 429):  # (a slow-down: the job stays queued)

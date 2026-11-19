@@ -369,6 +369,10 @@ def test_the_newest_release_for_this_system_is_offered():
                      "url": "https://x/v0.2.0-beta.8/Card-Farm-Windows.zip", "sha256": "ab"}
     assert update.newest(rel, "v0.2.0-beta.8", "windows") is None          # already the newest
     assert update.newest(rel, "v0.2.0", "windows") is None                 # finished versions skip betas
+    one = [release("v0.5.0-beta.1"), dict(release("v1.0.0"), prerelease=False), release("v1.1.0-beta.1")]
+    assert update.newest(one, "v0.5.0-beta.1", "windows")["version"] == "v1.1.0-beta.1"   # betas see betas
+    assert update.newest(one[:2], "v0.5.0-beta.1", "windows")["version"] == "v1.0.0"     # a beta moves up to 1.0
+    assert update.newest(one, "v1.0.0", "windows") is None                                # 1.0 stays off betas
     assert update.newest(rel, "v0.2.0-beta.7", None)["url"] is None        # from source: a link only
 
 
@@ -1052,6 +1056,65 @@ def test_quick_badge_prices_buys_and_crafts_to_the_top(world, monkeypatch):
     assert log.count(("craft", 7)) == 4 and not f.finishing(7)
 
 
+def test_quick_badge_run_again_never_buys_the_same_cards_twice(world, monkeypatch):
+    # Steam says "too many requests" after the first card was bought: the worker keeps the job
+    # and runs it again later. The second run buys only the second card.
+    f, log = quick_world(world, monkeypatch)
+    f._price_badge(7)
+    f.quick_badge(7, 5)
+    e = f.state["queue"][0]["entry"]
+    real = f._buy_many
+    calls = []
+
+    def buy_many(h, price, q):
+        calls.append(h)
+        if h == "7-B" and len(calls) == 2:
+            raise steam.HttpError(429, "", "https://steamcommunity.com/market/")
+        return real(h, price, q)
+    monkeypatch.setattr(f, "_buy_many", buy_many)
+    with pytest.raises(steam.HttpError):
+        f._do_quick(e)
+    assert e["bought"] == {"7-A": 4} and e["spent"] == 12
+    assert f.state["queue"][0]["entry"]["bought"] == {"7-A": 4}       # saved with the queue
+    log.clear()
+    f._do_quick(e)                               # the run again: 7-A isn't in the inventory yet
+    assert not any(x[:2] == ("order", "7-A") for x in log)
+    assert ("order", "7-B", 5) in log and ("order", "7-B", 9, 2) in log and log.count(("craft", 7)) == 4
+
+
+def test_quick_badge_counts_bought_cards_that_reached_the_inventory(world, monkeypatch):
+    # the app closed between a purchase and saving it: the inventory shows the cards, so the run
+    # after the restart doesn't buy them again
+    f, log = quick_world(world, monkeypatch)
+    f._price_badge(7)
+    f.quick_badge(7, 5)
+    e = f.state["queue"][0]["entry"]
+    world["cards"] += [card(assetid=f"a{i}", appid=7, hash="7-A", name="A") for i in range(4)]
+    f._do_quick(e)
+    assert not any(x[:2] == ("order", "7-A") for x in log) and log.count(("craft", 7)) == 4
+
+
+def test_a_set_run_again_buys_only_what_is_still_missing(world, monkeypatch):
+    log = buying_world(monkeypatch)
+    monkeypatch.setattr(steam, "cheapest_listing", lambda s, p, h: {"10-B": 6, "10-C": 7}[h])
+    f = world["make"]()
+    e = {"offer": {"appid": 10, "game": "Game", "missing_hashes": ["10-B", "10-C"]}}
+    real = f._buy
+
+    def buy(h, price):
+        if h == "10-C" and not e.get("again"):
+            raise steam.HttpError(429, "", "https://steamcommunity.com/market/")
+        return real(h, price)
+    monkeypatch.setattr(f, "_buy", buy)
+    with pytest.raises(steam.HttpError):
+        f._do_set(e)
+    assert e["bought"] == {"10-B": 1} and e["spent"] == 6
+    e["again"] = True
+    log.clear()
+    f._do_set(e)
+    assert log == [("order", "10-C", 7), ("craft", 10)]
+
+
 def test_quick_badge_wont_spend_past_the_wallet(world, monkeypatch):
     f, log = quick_world(world, monkeypatch, wallet=20)
     f._price_badge(7)
@@ -1126,6 +1189,35 @@ def test_a_buy_order_is_on_record_the_moment_its_placed(world, monkeypatch):
     f._do("place", job)                                                  # the job stayed queued: only the rest goes up
     assert log == [("order", "7-A"), ("order", "7-B")] and len(f.state["patient"]) == 1
     assert [o["hash"] for o in f.state["orders"]] == ["7-A", "7-B"]
+
+
+def test_an_order_that_filled_while_the_job_waited_isnt_placed_again(world, monkeypatch):
+    f, log, job = orders_job(world, monkeypatch)
+    slow = [True]
+
+    def order(s, h, p, q=1, **kw):
+        if h == "7-B" and slow[0]:
+            raise steam.HttpError(429)
+        log.append(("order", h))
+        return {"orderid": h}
+    monkeypatch.setattr(steam, "create_buy_order", order)
+    with pytest.raises(steam.HttpError):
+        f._do("place", job)
+    f.state["orders"] = []                       # 7-A filled meanwhile: the check took it off the list
+    slow[0] = False
+    f._do("place", job)
+    assert log == [("order", "7-A"), ("order", "7-B")]
+
+
+def test_a_booster_made_before_a_stop_is_listed_not_made_again(world, monkeypatch):
+    made, sold = [], []
+    monkeypatch.setattr(steam, "booster_options", lambda s: ([], 900))
+    monkeypatch.setattr(steam, "create_booster", lambda s, a, se: made.append(a))
+    monkeypatch.setattr(steam, "_inventory", lambda s, a, c: [({"assetid": "p1"}, {"market_hash_name": "1-G Booster Pack"})])
+    monkeypatch.setattr(steam, "sell", lambda s, asset, receive, *a: sold.append(asset))
+    f = world["make"]()
+    e = {"booster": {"appid": 1, "name": "G", "series": 1, "gems": 600}, "made": True}
+    assert f._do_booster(e) == 1 and made == [] and sold == ["p1"]
 
 
 def test_orders_steam_refuses_dont_leave_a_set_waiting_for_nothing(world, monkeypatch):
@@ -1268,7 +1360,7 @@ def test_a_cancelled_item_waits_for_review_instead_of_being_listed_again(world, 
 
 
 def test_buying_waits_while_steam_still_holds_the_last_order(world, monkeypatch):
-    log = buying_world(monkeypatch)
+    buying_world(monkeypatch)
     f, tries = world["make"](), []
 
     def order(s, h, p, q=1, **kw):
@@ -1434,7 +1526,7 @@ def test_inventory_items_carry_their_gem_lookup():
     desc = lambda marketable, goo, cls="item_class_3": {
         "marketable": marketable, "name": "Harbor", "market_hash_name": "1001-Harbor", "icon_url": "",
         "tags": [{"category": "item_class", "internal_name": cls}],
-        "owner_actions": [{"link": f"javascript:GetGooValue( '%contextid%', '%assetid%', 1001, 3, 0 )"}] if goo else []}
+        "owner_actions": [{"link": "javascript:GetGooValue( '%contextid%', '%assetid%', 1001, 3, 0 )"}] if goo else []}
     stock = [({"assetid": "1"}, desc(True, True)), ({"assetid": "2"}, desc(False, True)), ({"assetid": "3"}, desc(False, False)),
              ({"assetid": "4"}, desc(True, True, "item_class_2"))]  # a card: the Cards tab's
     got = steam.sellable_items(stock, 753, 6, "Steam")
