@@ -1,0 +1,68 @@
+name: Something went wrong
+description: A problem with Card Farmer's Market - farming, selling, buying, the window or updating
+labels: ["problem"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting it! The more of this you fill in, the faster it can be fixed.
+        Please don't paste anything from `session.json` - that's your Steam sign-in.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: At the top of the window, next to your account name, or the release you downloaded.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - Windows
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux (.pyz)
+        - Linux (pipx / from source)
+        - Steam Deck (desktop mode)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happened
+      options:
+        - Farming (games, drops, playtime)
+        - Selling or gems (Cards or Items tab)
+        - Market tab (listings, earnings, alerts)
+        - Gems tab (sacks, booster packs)
+        - Badges tab (Quick badge, Finish sets, Level up)
+        - Signing in
+        - Updating
+        - The window itself
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: What you pressed, what the app did, and what you thought it would do.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: card-farm.log
+      description: |
+        Attach the file, or paste the lines from around when it happened. It's in the data folder:
+        `~/.local/share/card-farm` on Linux, `%APPDATA%\Card Farm` on Windows,
+        `~/Library/Application Support/Card Farm` on macOS. It doesn't record your sign-in.
+      render: text
+  - type: checkboxes
+    id: money
+    attributes:
+      label: Money or items
+      options:
+        - label: This cost money, or sold, bought or turned into gems something it shouldn't have

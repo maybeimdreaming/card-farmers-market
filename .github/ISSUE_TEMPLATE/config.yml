@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and how it's going
+    url: https://github.com/maybeimdreaming/card-farmers-market/discussions
+    about: Ask anything, share what it farmed for you, or talk about an idea before it becomes an issue.

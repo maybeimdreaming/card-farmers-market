@@ -179,7 +179,7 @@ def demo(farm):
             ("Ash Gate", 1, [[6, 31], [7, 12], [9, 4]]), ("Cinder Path", 0, [[5, 2], [6, 40], [8, 9]]),
             ("Low Tide", 2, [[7, 18], [8, 3]]), ("Kite String", 0, [[4, 1], [5, 1], [6, 22], [7, 30], [9, 3], [11, 2], [15, 1]]),
             ("Rust Bolt", 1, [[9, 6], [10, 14]]), ("Lantern Keeper", 0, [[12, 3], [13, 8]])]]}}
-    farm.update = {"version": "v0.4.0-beta.1", "page": "https://example.invalid", "url": "x", "sha256": ""}
+    farm.update = {"version": "v1.0.1", "page": "https://example.invalid", "url": "x", "sha256": ""}
     farm.status = "Farming 3 games"
 
 
