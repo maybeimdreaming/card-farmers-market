@@ -1,5 +1,10 @@
 # Card Farmer's Market
 
+[![Latest release](https://img.shields.io/github/v/release/maybeimdreaming/card-farmers-market?label=release)](https://github.com/maybeimdreaming/card-farmers-market/releases/latest)
+[![Tests](https://github.com/maybeimdreaming/card-farmers-market/actions/workflows/tests.yml/badge.svg)](https://github.com/maybeimdreaming/card-farmers-market/actions/workflows/tests.yml)
+![Linux, Windows, macOS](https://img.shields.io/badge/runs_on-Linux_%7C_Windows_%7C_macOS-4a8f2a)
+[![MIT licence](https://img.shields.io/github/license/maybeimdreaming/card-farmers-market)](LICENSE)
+
 Farm your Steam trading card drops on Linux, Windows or macOS, then sell each card or turn it into gems by rules you set.
 Card Farmer's Market is a desktop app with its own window. It keeps farming in the background when you close it.
 
@@ -7,7 +12,11 @@ It looks like a little garden: the tabs sit on a strip of grass, and **a flower 
 you farm**. Foil cards grow a shimmering one. Pick **Light**, **Dark** or **Pink** at the top, or **Auto** to follow
 your system.
 
-![The Cards tab](docs/cards.png)
+![A tour of Card Farmer's Market: the Cards, Items, Market, Gems and Badges tabs, then the light and pink themes](docs/tour.gif)
+
+**Free and open source. It never sees your Steam password:** you sign in by scanning a QR code with the Steam mobile app.
+On Linux it idles natively, through Steam's own API library, with no Wine or Proton.
+[Download it](#download), and see [Trying it out](#trying-it-out) before you let it spend anything.
 
 ### Cards
 
@@ -113,6 +122,20 @@ starts Card Farmer's Market minimised.)
 Settings, the review lists and your Steam sign-in are kept in `~/.local/share/card-farm` on Linux,
 `%APPDATA%\Card Farm` on Windows and `~/Library/Application Support/Card Farm` on macOS; the sign-in
 file is readable only by you. `farm-history.json` there lists every card the app has farmed (when, which, foil or not, and the version). `card-farm.log` there keeps what the Activity log showed and what went wrong behind it (it starts over at 1 MB): the file to attach when you report a problem. A settings or state file that got damaged is set aside as `<name>.broken` and the last good copy is used. `CARD_FARM_DATA` changes the folder.
+
+## Trying it out
+
+Card Farmer's Market sells and buys on the Steam Community Market with your account, so start gently:
+
+1. **Farm first.** Sign in and start farming. Card drops come at Steam's pace, so give it a few hours.
+2. **Keep selling on Review** (Rules on the Cards tab) for the first days. Every card then waits in the window with what it would sell for and what its gems are worth, and nothing is listed until you press Sell. Switch to **Auto** once its choices look right to you.
+3. **Try buying small.** Quick badge, Finish sets and Level up spend your Steam wallet. Try one cheap badge before a big Level up, and keep the limits low until you've seen it work.
+4. **Confirm in the Steam app.** Listings and purchases may wait for your OK in the Steam mobile app (Confirmations). The window says when some are waiting.
+
+### Feedback and problems
+
+- **Something went wrong?** [Open an issue](https://github.com/maybeimdreaming/card-farmers-market/issues/new/choose) and attach `card-farm.log` from the data folder: `~/.local/share/card-farm` on Linux, `%APPDATA%\Card Farm` on Windows, `~/Library/Application Support/Card Farm` on macOS. It has what the Activity log showed and the errors behind it, and doesn't record your sign-in.
+- **Ideas, questions, or how it's going for you:** [Discussions](https://github.com/maybeimdreaming/card-farmers-market/discussions).
 
 ## How the decision works
 

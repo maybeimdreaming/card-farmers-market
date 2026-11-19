@@ -185,7 +185,7 @@ def demo(farm):
                                              ("AAAAA-BBBBB-CCC03", "added", ["Paper Lanterns"]), ("AAAAA-BBBBB-CCC04", "added", ["Night Bus: Deluxe Edition"]),
                                              ("AAAAA-BBBBB-CCC05", "owned", ["Tidewater"]), ("AAAAA-BBBBB-CCC06", "invalid", []),
                                              ("AAAAA-BBBBB-CCC07", "region", ["Sky Ledger"])])]
-    farm.update = {"version": "v0.4.0-beta.1", "page": "https://example.invalid", "url": "x", "sha256": ""}
+    farm.update = {"version": "v1.0.1", "page": "https://example.invalid", "url": "x", "sha256": ""}
     farm.status = "Farming 3 games"
 
 
