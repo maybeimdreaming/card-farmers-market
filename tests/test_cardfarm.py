@@ -1186,6 +1186,35 @@ def test_a_buy_order_is_on_record_the_moment_its_placed(world, monkeypatch):
     assert [o["hash"] for o in f.state["orders"]] == ["7-A", "7-B"]
 
 
+def test_an_order_that_filled_while_the_job_waited_isnt_placed_again(world, monkeypatch):
+    f, log, job = orders_job(world, monkeypatch)
+    slow = [True]
+
+    def order(s, h, p, q=1, **kw):
+        if h == "7-B" and slow[0]:
+            raise steam.HttpError(429)
+        log.append(("order", h))
+        return {"orderid": h}
+    monkeypatch.setattr(steam, "create_buy_order", order)
+    with pytest.raises(steam.HttpError):
+        f._do("place", job)
+    f.state["orders"] = []                       # 7-A filled meanwhile: the check took it off the list
+    slow[0] = False
+    f._do("place", job)
+    assert log == [("order", "7-A"), ("order", "7-B")]
+
+
+def test_a_booster_made_before_a_stop_is_listed_not_made_again(world, monkeypatch):
+    made, sold = [], []
+    monkeypatch.setattr(steam, "booster_options", lambda s: ([], 900))
+    monkeypatch.setattr(steam, "create_booster", lambda s, a, se: made.append(a))
+    monkeypatch.setattr(steam, "_inventory", lambda s, a, c: [({"assetid": "p1"}, {"market_hash_name": "1-G Booster Pack"})])
+    monkeypatch.setattr(steam, "sell", lambda s, asset, receive, *a: sold.append(asset))
+    f = world["make"]()
+    e = {"booster": {"appid": 1, "name": "G", "series": 1, "gems": 600}, "made": True}
+    assert f._do_booster(e) == 1 and made == [] and sold == ["p1"]
+
+
 def test_orders_steam_refuses_dont_leave_a_set_waiting_for_nothing(world, monkeypatch):
     f, log, job = orders_job(world, monkeypatch)
 
