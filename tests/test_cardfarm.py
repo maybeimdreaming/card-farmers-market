@@ -368,6 +368,10 @@ def test_the_newest_release_for_this_system_is_offered():
                      "url": "https://x/v0.2.0-beta.8/Card-Farm-Windows.zip", "sha256": "ab"}
     assert update.newest(rel, "v0.2.0-beta.8", "windows") is None          # already the newest
     assert update.newest(rel, "v0.2.0", "windows") is None                 # finished versions skip betas
+    one = [release("v0.5.0-beta.1"), dict(release("v1.0.0"), prerelease=False), release("v1.1.0-beta.1")]
+    assert update.newest(one, "v0.5.0-beta.1", "windows")["version"] == "v1.1.0-beta.1"   # betas see betas
+    assert update.newest(one[:2], "v0.5.0-beta.1", "windows")["version"] == "v1.0.0"     # a beta moves up to 1.0
+    assert update.newest(one, "v1.0.0", "windows") is None                                # 1.0 stays off betas
     assert update.newest(rel, "v0.2.0-beta.7", None)["url"] is None        # from source: a link only
 
 
@@ -1355,7 +1359,7 @@ def test_a_cancelled_item_waits_for_review_instead_of_being_listed_again(world, 
 
 
 def test_buying_waits_while_steam_still_holds_the_last_order(world, monkeypatch):
-    log = buying_world(monkeypatch)
+    buying_world(monkeypatch)
     f, tries = world["make"](), []
 
     def order(s, h, p, q=1, **kw):
@@ -1521,7 +1525,7 @@ def test_inventory_items_carry_their_gem_lookup():
     desc = lambda marketable, goo, cls="item_class_3": {
         "marketable": marketable, "name": "Harbor", "market_hash_name": "1001-Harbor", "icon_url": "",
         "tags": [{"category": "item_class", "internal_name": cls}],
-        "owner_actions": [{"link": f"javascript:GetGooValue( '%contextid%', '%assetid%', 1001, 3, 0 )"}] if goo else []}
+        "owner_actions": [{"link": "javascript:GetGooValue( '%contextid%', '%assetid%', 1001, 3, 0 )"}] if goo else []}
     stock = [({"assetid": "1"}, desc(True, True)), ({"assetid": "2"}, desc(False, True)), ({"assetid": "3"}, desc(False, False)),
              ({"assetid": "4"}, desc(True, True, "item_class_2"))]  # a card: the Cards tab's
     got = steam.sellable_items(stock, 753, 6, "Steam")

@@ -4,7 +4,6 @@ check it against the SHA-256 GitHub publishes for it, and swap it in once Card F
 The swap is done by a small helper started just before Card Farm quits (a running program can't
 replace its own files on Windows, and a .pyz can't be swapped while it's being read)."""
 import hashlib
-import json
 import os
 import platform
 import re
