@@ -589,20 +589,45 @@ class MarketParts:
         self._until_closed(order["orderid"])
         return bought
 
+    def _bought(self, e, hash_name, n, cents):
+        """A buying job's progress, saved on its queue entry as each purchase lands, so a job run
+        again (after Steam's "too many requests", or a restart) never buys the same cards twice."""
+        if not n:
+            return
+        with self.lock:
+            done = e.setdefault("bought", {})
+            done[hash_name] = done.get(hash_name, 0) + n
+            e["spent"] = e.get("spent", 0) + cents
+        self.save()
+
+    def _held(self, appid):
+        """How many of each of a game's normal cards are in the inventory now (cards listed and
+        waiting for the Steam app don't count)."""
+        pending, held = steam.pending_listings(self.session), {}
+        for c in steam.cards_in_inventory(self.session):
+            if c["appid"] == appid and not c["foil"] and c["assetid"] not in pending:
+                held[c["hash"]] = held.get(c["hash"], 0) + 1
+        return held
+
     def _do_set(self, e):
         """Price every missing card (cheapest listing that isn't yours) and stop before buying
-        anything if one can't be had or the total is over the limit; then buy them and craft."""
-        o, spent = e["offer"], 0
+        anything if one can't be had or the total is over the limit; then buy them and craft.
+        Run again, it buys only what's still missing: a card counts as bought once it's in the
+        inventory or this job saved buying it."""
+        o, spent = e["offer"], e.get("spent", 0)
         if steam.card_set(self.session, o["appid"])["level"] >= 5:
             raise RuntimeError(f"the {o['game']} badge is already at its top level")
+        held, done = self._held(o["appid"]), e.get("bought", {})
         plan = []
         for hash_name in o["missing_hashes"]:
+            if held.get(hash_name) or done.get(hash_name):
+                continue
             price = steam.cheapest_listing(self.session, self.prices, hash_name)
             if not price:
                 raise RuntimeError(f"nobody else is selling {hash_name.split('-', 1)[1]} right now; nothing bought")
             plan.append((hash_name, price))
         total, budget = sum(p for _, p in plan), o.get("limit") or self.settings["set_budget_cents"]
-        if total > budget:
+        if spent + total > budget:
             raise RuntimeError(f"the {o['game']} cards cost ${total / 100:.2f} now, over your limit; nothing bought")
         for n, (hash_name, price) in enumerate(plan):
             name = hash_name.split("-", 1)[1]
@@ -612,6 +637,7 @@ class MarketParts:
                 if not price or spent + price + rest > budget or not self._buy(hash_name, price):
                     raise RuntimeError(f"couldn't buy {name} within your limit; stopped after ${spent / 100:.2f}")
             spent += price
+            self._bought(e, hash_name, 1, price)
             self.log(f"Bought {name} for ${price / 100:.2f}")
         for attempt in range(6):
             try:

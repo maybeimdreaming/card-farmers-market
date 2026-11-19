@@ -1051,6 +1051,65 @@ def test_quick_badge_prices_buys_and_crafts_to_the_top(world, monkeypatch):
     assert log.count(("craft", 7)) == 4 and not f.finishing(7)
 
 
+def test_quick_badge_run_again_never_buys_the_same_cards_twice(world, monkeypatch):
+    # Steam says "too many requests" after the first card was bought: the worker keeps the job
+    # and runs it again later. The second run buys only the second card.
+    f, log = quick_world(world, monkeypatch)
+    f._price_badge(7)
+    f.quick_badge(7, 5)
+    e = f.state["queue"][0]["entry"]
+    real = f._buy_many
+    calls = []
+
+    def buy_many(h, price, q):
+        calls.append(h)
+        if h == "7-B" and len(calls) == 2:
+            raise steam.HttpError(429, "", "https://steamcommunity.com/market/")
+        return real(h, price, q)
+    monkeypatch.setattr(f, "_buy_many", buy_many)
+    with pytest.raises(steam.HttpError):
+        f._do_quick(e)
+    assert e["bought"] == {"7-A": 4} and e["spent"] == 12
+    assert f.state["queue"][0]["entry"]["bought"] == {"7-A": 4}       # saved with the queue
+    log.clear()
+    f._do_quick(e)                               # the run again: 7-A isn't in the inventory yet
+    assert not any(x[:2] == ("order", "7-A") for x in log)
+    assert ("order", "7-B", 5) in log and ("order", "7-B", 9, 2) in log and log.count(("craft", 7)) == 4
+
+
+def test_quick_badge_counts_bought_cards_that_reached_the_inventory(world, monkeypatch):
+    # the app closed between a purchase and saving it: the inventory shows the cards, so the run
+    # after the restart doesn't buy them again
+    f, log = quick_world(world, monkeypatch)
+    f._price_badge(7)
+    f.quick_badge(7, 5)
+    e = f.state["queue"][0]["entry"]
+    world["cards"] += [card(assetid=f"a{i}", appid=7, hash="7-A", name="A") for i in range(4)]
+    f._do_quick(e)
+    assert not any(x[:2] == ("order", "7-A") for x in log) and log.count(("craft", 7)) == 4
+
+
+def test_a_set_run_again_buys_only_what_is_still_missing(world, monkeypatch):
+    log = buying_world(monkeypatch)
+    monkeypatch.setattr(steam, "cheapest_listing", lambda s, p, h: {"10-B": 6, "10-C": 7}[h])
+    f = world["make"]()
+    e = {"offer": {"appid": 10, "game": "Game", "missing_hashes": ["10-B", "10-C"]}}
+    real = f._buy
+
+    def buy(h, price):
+        if h == "10-C" and not e.get("again"):
+            raise steam.HttpError(429, "", "https://steamcommunity.com/market/")
+        return real(h, price)
+    monkeypatch.setattr(f, "_buy", buy)
+    with pytest.raises(steam.HttpError):
+        f._do_set(e)
+    assert e["bought"] == {"10-B": 1} and e["spent"] == 6
+    e["again"] = True
+    log.clear()
+    f._do_set(e)
+    assert log == [("order", "10-C", 7), ("craft", 10)]
+
+
 def test_quick_badge_wont_spend_past_the_wallet(world, monkeypatch):
     f, log = quick_world(world, monkeypatch, wallet=20)
     f._price_badge(7)

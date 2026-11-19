@@ -262,30 +262,40 @@ class QuickBadge:
     def _do_quick(self, e):
         """Buy each card's listings as priced; a card whose listings sold meanwhile is priced again
         and bought at the next ones, as long as the whole stays within the limit. Then craft each
-        level."""
-        appid, game, spent, bought = e["appid"], e["game"], 0, 0
+        level. Run again (after Steam's "too many requests", or a restart), it buys only what's
+        still needed: the fewer of what the inventory says is missing and what this job hasn't
+        saved buying yet, so cards never get bought twice."""
+        appid, game, bought = e["appid"], e["game"], 0
+        spent = e.get("spent", 0)
         level = steam.card_set(self.session, appid)["level"]
         crafts = e["target"] - level
         if crafts <= 0:
             with self.lock:
                 self.state["finishing"].pop(str(appid), None)
             raise RuntimeError(f"the {game} badge is already at level {level}")
+        held, done = self._held(appid), e.get("bought", {})
         try:
             for n, c in enumerate(e["cards"]):
+                need = max(0, min(crafts - held.get(c["hash"], 0), c["need"] - done.get(c["hash"], 0)))
+                if not need:
+                    continue
                 got = 0
-                for price, count in c["lots"]:
-                    k = self._buy_many(c["hash"], price, count)
-                    got, spent = got + k, spent + price * k
-                if got < c["need"]:  # some sold first: the next listings, if the whole still fits
-                    lots = buy_lots(steam.order_book(self.session, self.prices, c["hash"])["sell"], c["need"] - got)
-                    rest = sum(x["cost"] for x in e["cards"][n + 1:])
+                if need == c["need"]:            # nothing of it bought yet: the listings as priced
+                    for price, count in c["lots"]:
+                        k = self._buy_many(c["hash"], price, count)
+                        got, spent = got + k, spent + price * k
+                        self._bought(e, c["hash"], k, price * k)
+                if got < need:  # some sold first, or a run again: the next listings, if the whole still fits
+                    lots = buy_lots(steam.order_book(self.session, self.prices, c["hash"])["sell"], need - got)
+                    rest = sum(x["cost"] for x in e["cards"][n + 1:] if done.get(x["hash"], 0) < x["need"])
                     more = sum(p * k for p, k in lots or [])
                     if lots is None or spent + more + rest > e["limit"]:
                         raise RuntimeError(f"not enough {c['name']} left within the limit")
                     for price, count in lots:
                         k = self._buy_many(c["hash"], price, count)
                         got, spent = got + k, spent + price * k
-                    if got < c["need"]:
+                        self._bought(e, c["hash"], k, price * k)
+                    if got < need:
                         raise RuntimeError(f"couldn't buy enough {c['name']}")
                 bought += got
                 if got:
